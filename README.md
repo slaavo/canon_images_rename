@@ -1,18 +1,18 @@
 # Photo Organizer
 
-Szybkie batch'owe organizowanie zdjęć według daty EXIF.
+Fast batch photo organization by EXIF date.
 
-## Funkcje
+## Features
 
-- **Szybkość**: Pojedyncze wywołanie exiftool + wielowątkowe przenoszenie (10-50x szybciej niż sekwencyjnie)
-- **Formaty**: CR3, DNG, ARW, NEF, ORF, RAF, RW2, JPG, JPEG
-- **Struktura folderów**: `YYYY_MM_DD/` z podfolderami `!orig/` i `!jpg/`
-- **Nazewnictwo**: `YYYY_MM_DD_HHMMSS_oryginalna_nazwa.rozszerzenie`
-- **Bezpieczeństwo**: dry-run, obsługa duplikatów, graceful Ctrl+C
+- **Speed**: Single exiftool call + multithreaded file moves (10-50x faster than sequential)
+- **Formats**: CR3, DNG, ARW, NEF, ORF, RAF, RW2, JPG, JPEG
+- **Folder structure**: `YYYY_MM_DD/` with `!orig/` and `!jpg/` subfolders
+- **Naming**: `YYYY_MM_DD_HHMMSS_original_name.extension`
+- **Safety**: dry-run mode, duplicate handling, graceful Ctrl+C
 
-## Wymagania
+## Requirements
 
-- Python 3.8+
+- Python 3.10+
 - exiftool
 
 ```bash
@@ -23,94 +23,94 @@ sudo apt install libimage-exiftool-perl
 brew install exiftool
 
 # Windows
-# Pobierz z https://exiftool.org
+# Download from https://exiftool.org
 ```
 
-## Użycie
+## Usage
 
 ```bash
-# Podstawowe - organizuj bieżący folder
+# Basic — organize current folder
 ./rename_and_move_files.py
 
-# Wskaż folder
-./rename_and_move_files.py /ścieżka/do/zdjęć
+# Specify input folder
+./rename_and_move_files.py /path/to/photos
 
-# Inny folder wyjściowy
-./rename_and_move_files.py -o /wyjście /zdjęcia
+# Different output folder
+./rename_and_move_files.py -o /output /path/to/photos
 
-# Dry-run - podgląd zmian bez przenoszenia
-./rename_and_move_files.py -d /zdjęcia
+# Dry run — preview changes without moving files
+./rename_and_move_files.py -d /path/to/photos
 
-# RAW do !orig (domyślnie tylko JPEG idzie do !orig)
-./rename_and_move_files.py -r /zdjęcia
+# Move RAW files to !orig (by default only JPEGs go to !orig)
+./rename_and_move_files.py -r /path/to/photos
 
-# Więcej wątków (szybciej na NVMe)
-./rename_and_move_files.py -w 8 /zdjęcia
+# More workers (faster on NVMe)
+./rename_and_move_files.py -w 16 /path/to/photos
 
-# Mniej wątków (bezpieczniej na HDD)
-./rename_and_move_files.py -w 1 /zdjęcia
+# Fewer workers (safer on HDD)
+./rename_and_move_files.py -w 1 /path/to/photos
 
-# Verbose - szczegółowe logi
-./rename_and_move_files.py -v /zdjęcia
+# Verbose — detailed logs
+./rename_and_move_files.py -v /path/to/photos
 ```
 
-## Opcje
+## Options
 
-| Opcja | Opis |
-|-------|------|
-| `-o, --output DIR` | Folder wyjściowy (domyślnie: ten sam co wejściowy) |
-| `-d, --dry-run` | Podgląd zmian bez przenoszenia plików |
-| `-r, --raw-subfolder` | Przenieś RAW do `!orig/` (domyślnie tylko JPEG) |
-| `-w, --workers N` | Liczba wątków (domyślnie: 4) |
-| `-v, --verbose` | Szczegółowe logi |
+| Option | Description |
+|--------|-------------|
+| `-o, --output DIR` | Output folder (default: same as input) |
+| `-d, --dry-run` | Preview changes without moving files |
+| `-r, --raw-subfolder` | Move RAW files to `!orig/` (by default only JPEGs) |
+| `-w, --workers N` | Number of parallel workers (default: 8, range: 1-64) |
+| `-v, --verbose` | Detailed log output |
 
-## Struktura wyjściowa
+## Output structure
 
 ```
-/wyjście/
+/output/
 ├── 2024_01_15/
-│   ├── !jpg/                    # (tworzony, ale nieużywany w tej wersji)
+│   ├── !jpg/                    # (created on demand, used downstream)
 │   ├── !orig/
 │   │   ├── 2024_01_15_143052_IMG_1234.JPG
-│   │   └── 2024_01_15_143052_IMG_1234.CR3   # tylko z -r
-│   ├── 2024_01_15_143052_IMG_1234.CR3       # bez -r
+│   │   └── 2024_01_15_143052_IMG_1234.CR3   # only with -r
+│   ├── 2024_01_15_143052_IMG_1234.CR3       # without -r
 │   └── 2024_01_15_143105_IMG_1235.CR3
 ├── 2024_01_16/
 │   └── ...
 ```
 
-## Jak to działa
+## How it works
 
-1. **Skanowanie** — `os.scandir()` znajduje pliki z obsługiwanymi rozszerzeniami
-2. **EXIF** — Jedno wywołanie `exiftool` pobiera daty wszystkich plików naraz
-3. **Fallback** — Brak EXIF? Używa daty modyfikacji pliku
-4. **Konflikty** — Duplikaty nazw dostają suffix `_2`, `_3`, itd.
-5. **Przenoszenie** — `ThreadPoolExecutor` przenosi pliki równolegle
+1. **Scan** — `os.scandir()` finds files with supported extensions
+2. **EXIF** — A single `exiftool` call reads dates for all files at once
+3. **Fallback** — No EXIF data? Uses the file modification date instead
+4. **Conflicts** — Duplicate filenames get a `_2`, `_3`, etc. suffix
+5. **Move** — `ThreadPoolExecutor` moves files in parallel
 
-## Wydajność
+## Performance
 
-| Dysk | Zalecane wątki | Przyspieszenie |
-|------|----------------|----------------|
+| Storage | Recommended workers | Speedup |
+|---------|---------------------|---------|
 | NVMe | 8-16 | 5-10x |
 | SATA SSD | 4-8 | 3-5x |
-| HDD | 1-2 | 1x (sekwencyjny lepszy) |
+| HDD | 1-2 | 1x (sequential is better) |
 
-## Obsługa błędów
+## Error handling
 
-- **Brak exiftool** — Czytelny komunikat z instrukcją instalacji
-- **Brak uprawnień** — Loguje błąd, kontynuuje z resztą
-- **Ctrl+C** — Kończy bieżące operacje, raportuje postęp
-- **Brak daty** — Pomija plik z ostrzeżeniem
+- **Missing exiftool** — Clear message with installation instructions
+- **Permission denied** — Logs error, continues with remaining files
+- **Ctrl+C** — Finishes current operations, reports progress
+- **No date** — Skips file with a warning
 
-## Kody wyjścia
+## Exit codes
 
-| Kod | Znaczenie |
-|-----|-----------|
-| 0 | Sukces |
-| 1 | Błędy (brak exiftool, nieprawidłowa ścieżka, nieudane przeniesienia) |
-| 2 | Błąd argumentów |
-| 130 | Przerwane przez Ctrl+C |
+| Code | Meaning |
+|------|---------|
+| 0 | Success |
+| 1 | Errors (missing exiftool, invalid path, failed moves) |
+| 2 | Argument error |
+| 130 | Interrupted by Ctrl+C |
 
-## Licencja
+## License
 
 MIT
