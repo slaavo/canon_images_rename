@@ -42,6 +42,10 @@ DATE_PATTERN = re.compile(r"^\d{4}_\d{2}_\d{2}_\d{6}$")
 # Timeout for exiftool subprocess (seconds)
 EXIFTOOL_TIMEOUT = 300
 
+# Max number of files per single exiftool invocation.
+# Prevents hitting OS ARG_MAX (~2 MB on Linux) with long paths.
+EXIFTOOL_BATCH_SIZE = 5000
+
 # Default number of parallel workers for file operations.
 # 8 is a good default for SSD; use 1-2 for HDD, 8-16 for NVMe.
 DEFAULT_WORKERS = 8
@@ -148,19 +152,13 @@ def validate_date(date_str: str | None) -> str | None:
     return None
 
 
-def get_exif_dates(files: list[Path]) -> dict[str, str]:
+def _run_exiftool_batch(batch: list[Path]) -> dict[str, str]:
     """
-    Get dates for all files in a single exiftool call.
-
-    Fetches both DateTimeOriginal and CreateDate; prefers DateTimeOriginal,
-    falls back to CreateDate.
+    Run exiftool on a single batch of files.
 
     Returns a dict mapping filename -> formatted date string.
     """
-    if not files:
-        return {}
-
-    file_dates: dict[str, str] = {}
+    results: dict[str, str] = {}
 
     try:
         # -d (date format) must come before the tags it applies to
@@ -169,7 +167,7 @@ def get_exif_dates(files: list[Path]) -> dict[str, str]:
                 "exiftool", "-T",
                 "-d", "%Y_%m_%d_%H%M%S",
                 "-filename", "-DateTimeOriginal", "-CreateDate",
-            ] + [str(f) for f in files],
+            ] + [str(f) for f in batch],
             capture_output=True,
             text=True,
             timeout=EXIFTOOL_TIMEOUT,
@@ -185,7 +183,7 @@ def get_exif_dates(files: list[Path]) -> dict[str, str]:
 
     # Parse tab-separated output: filename \t DateTimeOriginal \t CreateDate
     if not result.stdout.strip():
-        return file_dates
+        return results
 
     for line in result.stdout.strip().split("\n"):
         parts = line.split("\t")
@@ -201,7 +199,28 @@ def get_exif_dates(files: list[Path]) -> dict[str, str]:
         # Prefer DateTimeOriginal, fall back to CreateDate
         date_value = date_original or date_create
         if date_value:
-            file_dates[filename] = date_value
+            results[filename] = date_value
+
+    return results
+
+
+def get_exif_dates(files: list[Path]) -> dict[str, str]:
+    """
+    Get dates for all files via exiftool.
+
+    Splits into batches of EXIFTOOL_BATCH_SIZE to stay within
+    OS argument length limits (ARG_MAX).
+
+    Returns a dict mapping filename -> formatted date string.
+    """
+    if not files:
+        return {}
+
+    file_dates: dict[str, str] = {}
+
+    for i in range(0, len(files), EXIFTOOL_BATCH_SIZE):
+        batch = files[i : i + EXIFTOOL_BATCH_SIZE]
+        file_dates.update(_run_exiftool_batch(batch))
 
     return file_dates
 
@@ -353,11 +372,16 @@ def move_single_file(
     """
     Move a single file from source to dest_path.
 
-    Designed to be called from a thread pool — each invocation is
-    independent with no shared mutable state.
+    Tries os.rename first (instant on same filesystem), falls back to
+    shutil.move for cross-device moves. Designed to be called from a
+    thread pool — each invocation is independent with no shared mutable state.
     """
     try:
-        shutil.move(str(source), str(dest_path))
+        try:
+            os.rename(source, dest_path)
+        except OSError:
+            # Cross-device move — fall back to copy + delete
+            shutil.move(source, dest_path)
 
         return MoveResult(
             success=True,
@@ -432,8 +456,8 @@ def process_files(
     if dry_run:
         log.warning("DRY RUN MODE — no changes will be made")
 
-    # Get all EXIF dates in a single batch call
-    log.info("Reading EXIF data (single batch call)...")
+    # Get all EXIF dates via exiftool (batched if >5000 files)
+    log.info("Reading EXIF data...")
     file_dates = get_exif_dates(files)
     log.info(f"Got EXIF dates for {len(file_dates)}/{len(files)} files")
 
