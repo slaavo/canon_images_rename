@@ -13,6 +13,7 @@ Requires: Python 3.8+, exiftool
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import copy
 import logging
 import os
@@ -40,6 +41,10 @@ DATE_PATTERN = re.compile(r"^\d{4}_\d{2}_\d{2}_\d{6}$")
 
 # Timeout for exiftool subprocess (seconds)
 EXIFTOOL_TIMEOUT = 300
+
+# Number of parallel workers for file operations
+# 4 is a good default for SSD; use 1 for HDD, more for NVMe
+DEFAULT_WORKERS = 8
 
 
 class FileInfo(NamedTuple):
@@ -335,6 +340,53 @@ def ensure_folders_exist(output_folder: Path, date_folders: Set[str]) -> None:
         (date_path / "!orig").mkdir(exist_ok=True)
 
 
+class MoveResult(NamedTuple):
+    """Result of a single file move operation."""
+    success: bool
+    source_name: str
+    dest_path: Optional[Path] = None
+    error: Optional[str] = None
+    is_duplicate: bool = False
+
+
+def move_single_file(
+    source: Path,
+    dest_path: Path,
+    is_duplicate: bool,
+) -> MoveResult:
+    """
+    Move a single file. Thread-safe operation.
+    
+    This function is designed to be called from multiple threads.
+    Each call is independent - no shared mutable state.
+    """
+    try:
+        # Verify source still exists
+        if not source.exists():
+            return MoveResult(
+                success=False,
+                source_name=source.name,
+                error="Source file missing",
+            )
+        
+        # Perform the move
+        shutil.move(str(source), str(dest_path))
+        
+        return MoveResult(
+            success=True,
+            source_name=source.name,
+            dest_path=dest_path,
+            is_duplicate=is_duplicate,
+        )
+        
+    except (OSError, shutil.Error) as e:
+        return MoveResult(
+            success=False,
+            source_name=source.name,
+            error=str(e),
+        )
+
+
 def validate_paths(input_folder: Path, output_folder: Path) -> bool:
     """
     Validate that input and output paths are safe to use together.
@@ -374,9 +426,12 @@ def process_files(
     move_raw_to_orig: bool,
     dry_run: bool,
     interrupt_handler: InterruptHandler,
+    workers: int = DEFAULT_WORKERS,
 ) -> Tuple[int, int]:
     """
     Process and organize photo files.
+    
+    Uses thread pool for parallel file moves on SSD.
 
     Returns:
         Tuple of (success_count, error_count)
@@ -460,54 +515,87 @@ def process_files(
         log.info(f"Creating {len(date_folders)} date folders...")
         ensure_folders_exist(output_folder, date_folders)
 
-    # Process files
-    log.info("Moving files...")
-    success_count = 0
-    error_count = skipped_count
-    total = len(file_infos)
-    
-    # Update progress less frequently for large batches
-    update_interval = max(1, total // 100)
-    
-    # Unique filename generator (tracks allocated names for dry-run accuracy)
+    # Generate all unique filenames BEFORE moving (must be sequential)
+    # This is thread-safe preparation phase
+    log.info("Resolving filename conflicts...")
     filename_gen = UniqueFilenameGenerator()
-
-    for i, info in enumerate(file_infos, 1):
-        # Check for interrupt
-        if interrupt_handler.interrupted:
-            log.warning(f"Stopping early. Processed {success_count} files.")
-            break
-            
-        print_progress(i, total, update_interval)
-        
-        # Generate unique filename (works correctly for both dry-run and real mode)
+    
+    # Prepare move tasks: (source, dest_path, is_duplicate)
+    move_tasks: List[Tuple[Path, Path, bool]] = []
+    
+    for info in file_infos:
         unique_filename = filename_gen.generate(info.dest_folder, info.new_filename)
         is_duplicate = (unique_filename != info.new_filename)
         dest_path = info.dest_folder / unique_filename
+        move_tasks.append((info.path, dest_path, is_duplicate))
 
-        if dry_run:
+    total = len(move_tasks)
+    
+    # Dry-run: just print what would happen
+    if dry_run:
+        for source, dest_path, is_duplicate in move_tasks:
             suffix = " (renamed: duplicate)" if is_duplicate else ""
-            print(f"\n  {info.path.name} -> {dest_path}{suffix}")
-            success_count += 1
-            interrupt_handler.processed_count += 1
-        else:
-            try:
-                # Verify source file still exists
-                if not info.path.exists():
-                    log.error(f"\n  Source file missing: {info.path.name}")
+            print(f"  {source.name} -> {dest_path}{suffix}")
+        return total, skipped_count
+
+    # Real mode: move files in parallel
+    log.info(f"Moving files (using {workers} workers)...")
+    
+    success_count = 0
+    error_count = skipped_count
+    completed = 0
+    
+    # Progress update - called only from main thread (in as_completed loop)
+    update_interval = max(1, total // 100)
+    
+    def update_progress() -> None:
+        """Update progress bar. Called from main thread only."""
+        nonlocal completed
+        completed += 1
+        print_progress(completed, total, update_interval)
+    
+    # Use ThreadPoolExecutor for parallel I/O
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+        # Submit all tasks
+        future_to_task = {
+            executor.submit(move_single_file, source, dest, is_dup): (source, dest, is_dup)
+            for source, dest, is_dup in move_tasks
+        }
+        
+        # Process results as they complete
+        try:
+            for future in concurrent.futures.as_completed(future_to_task):
+                result = future.result()
+                update_progress()
+                
+                if result.success:
+                    success_count += 1
+                    interrupt_handler.processed_count += 1
+                    if result.is_duplicate and result.dest_path is not None:
+                        log.debug(f"Renamed duplicate: {result.source_name} -> {result.dest_path.name}")
+                else:
+                    log.error(f"\n  Failed: {result.source_name} ({result.error})")
                     error_count += 1
-                    continue
+                
+                # Check for interrupt AFTER processing result
+                if interrupt_handler.interrupted:
+                    # Note: cancel() only affects tasks not yet started
+                    # Running tasks will complete before shutdown
+                    pending = sum(1 for f in future_to_task if not f.done())
+                    if pending > 0:
+                        log.warning(f"Cancelling {pending} pending tasks...")
+                    for f in future_to_task:
+                        f.cancel()
+                    break
                     
-                if is_duplicate:
-                    log.debug(f"Renamed duplicate: {info.new_filename} -> {unique_filename}")
-
-                shutil.move(str(info.path), str(dest_path))
-                success_count += 1
-                interrupt_handler.processed_count += 1
-
-            except (OSError, shutil.Error) as e:
-                log.error(f"\n  Failed: {info.path.name} ({e})")
-                error_count += 1
+        except KeyboardInterrupt:
+            # Fallback if signal handler didn't catch it
+            log.warning("Interrupted by user")
+            interrupt_handler.interrupted = True
+    
+    # Executor shutdown happens here (waits for running tasks)
+    if interrupt_handler.interrupted:
+        log.info(f"Stopped. Processed: {success_count}, Errors: {error_count}")
 
     # Clear progress line
     print()
@@ -526,6 +614,7 @@ Examples:
   %(prog)s -o /output /path/to/photos   # Different output folder
   %(prog)s -d /path/to/photos           # Dry run (preview changes)
   %(prog)s -r /path/to/photos           # Move RAW files to !orig subfolder
+  %(prog)s -w 8 /path/to/photos         # Use 8 parallel workers (faster on SSD)
 
 Supported formats:
   RAW:  CR3, DNG, ARW, NEF, ORF, RAF, RW2
@@ -558,8 +647,19 @@ Supported formats:
         action="store_true",
         help="Enable verbose output",
     )
+    parser.add_argument(
+        "-w", "--workers",
+        type=int,
+        default=DEFAULT_WORKERS,
+        metavar="N",
+        help=f"Number of parallel workers (default: {DEFAULT_WORKERS}, min: 1)",
+    )
 
     args = parser.parse_args()
+    
+    # Validate workers
+    if args.workers < 1:
+        parser.error("--workers must be at least 1")
 
     # Reconfigure logging if verbose (handlers cleared to prevent duplicates)
     global log
@@ -591,10 +691,11 @@ Supported formats:
             args.raw_subfolder,
             args.dry_run,
             interrupt_handler,
+            workers=args.workers,
         )
 
         if interrupt_handler.interrupted:
-            log.info(f"Interrupted. Processed: {success}, Errors: {errors}")
+            # Message already logged in process_files
             return 130  # Standard Ctrl+C exit code
         
         log.info(f"Done! Processed: {success}, Errors: {errors}")
