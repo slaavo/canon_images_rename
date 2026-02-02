@@ -4,7 +4,7 @@ Fast batch photo organization by EXIF date.
 
 ## Features
 
-- **Speed**: Single exiftool call + multithreaded file moves (10-50x faster than sequential)
+- **Speed**: Batched exiftool calls + multithreaded file moves (10-50x faster than sequential)
 - **Formats**: CR3, DNG, ARW, NEF, ORF, RAF, RW2, JPG, JPEG
 - **Folder structure**: `YYYY_MM_DD/` with `!orig/` and `!jpg/` subfolders
 - **Naming**: `YYYY_MM_DD_HHMMSS_original_name.extension`
@@ -82,7 +82,7 @@ brew install exiftool
 ## How it works
 
 1. **Scan** — `os.scandir()` finds files with supported extensions
-2. **EXIF** — A single `exiftool` call reads dates for all files at once
+2. **EXIF** — Batched `exiftool` calls read dates for all files at once
 3. **Fallback** — No EXIF data? Uses the file modification date instead
 4. **Conflicts** — Duplicate filenames get a `_2`, `_3`, etc. suffix
 5. **Move** — `ThreadPoolExecutor` moves files in parallel
