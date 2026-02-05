@@ -2,13 +2,7 @@
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
-
-import pytest
-
-# Add parent directory to path for imports
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from rename_and_move_files import validate_date, validate_paths
 
@@ -46,7 +40,7 @@ class TestValidateDate:
         """Exiftool's '-' placeholder for missing date should return None."""
         assert validate_date("-") is None
 
-    def test_whitespace(self):
+    def test_whitespace_only(self):
         """Strings with only whitespace should return None."""
         assert validate_date("   ") is None
         assert validate_date("\t\n") is None

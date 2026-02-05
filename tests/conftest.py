@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-import pytest
 from pathlib import Path
+
+import pytest
 
 
 @pytest.fixture
@@ -26,14 +27,6 @@ def sample_photos(tmp_path: Path) -> Path:
     (photos_dir / "notes.txt").touch()     # Should be ignored
 
     return photos_dir
-
-
-@pytest.fixture
-def output_dir(tmp_path: Path) -> Path:
-    """Create an empty output directory."""
-    out = tmp_path / "output"
-    out.mkdir()
-    return out
 
 
 @pytest.fixture

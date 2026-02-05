@@ -2,17 +2,12 @@
 
 from __future__ import annotations
 
-import sys
+import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
-
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
 from rename_and_move_files import (
     get_exif_dates,
-    _run_exiftool_batch,
     check_exiftool,
     get_file_mod_date,
 )
@@ -84,8 +79,6 @@ class TestGetExifDates:
 
     def test_handles_timeout(self):
         """Timeout should return empty dict."""
-        import subprocess
-
         with patch(
             "rename_and_move_files.subprocess.run",
             side_effect=subprocess.TimeoutExpired("exiftool", 300),
@@ -139,10 +132,16 @@ class TestCheckExiftool:
         ):
             assert check_exiftool() is False
 
+    def test_exiftool_returns_error(self):
+        """Return False when exiftool returns non-zero exit code."""
+        with patch(
+            "rename_and_move_files.subprocess.run",
+            side_effect=subprocess.CalledProcessError(1, "exiftool"),
+        ):
+            assert check_exiftool() is False
+
     def test_exiftool_timeout(self):
         """Return False when exiftool check times out."""
-        import subprocess
-
         with patch(
             "rename_and_move_files.subprocess.run",
             side_effect=subprocess.TimeoutExpired("exiftool", 10),
