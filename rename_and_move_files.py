@@ -430,39 +430,20 @@ def validate_paths(input_folder: Path, output_folder: Path) -> bool:
         return False
 
 
-def process_files(
-    input_folder: Path,
+def plan_moves(
+    files: list[Path],
+    file_dates: dict[str, str],
     output_folder: Path,
     move_raw_to_orig: bool,
-    dry_run: bool,
-    interrupt_handler: InterruptHandler,
-    workers: int = DEFAULT_WORKERS,
-) -> tuple[int, int]:
+) -> tuple[list[FileInfo], set[str], int, int]:
     """
-    Process and organize photo files.
+    Build FileInfo list and collect date folders.
 
-    Uses a thread pool for parallel file moves (optimized for SSD).
+    Pure function — no I/O except get_file_mod_date fallback.
 
     Returns:
-        A tuple of (success_count, error_count).
+        (file_infos, date_folders, fallback_count, skipped_count)
     """
-    files = find_files(input_folder)
-
-    if not files:
-        log.warning(f"No supported files found in: {input_folder}")
-        return 0, 0
-
-    log.info(f"Found {len(files)} files to process")
-    if dry_run:
-        log.warning("DRY RUN MODE — no changes will be made")
-
-    # Get all EXIF dates via exiftool (batched if >5000 files)
-    log.info("Reading EXIF data...")
-    file_dates = get_exif_dates(files)
-    log.info(f"Got EXIF dates for {len(file_dates)}/{len(files)} files")
-
-    # Prepare file info and collect unique date folders
-    log.info("Preparing file operations...")
     file_infos: list[FileInfo] = []
     date_folders: set[str] = set()
     skipped_count = 0
@@ -507,6 +488,46 @@ def process_files(
             new_filename=base_filename,
             dest_folder=dest_folder,
         ))
+
+    return file_infos, date_folders, fallback_count, skipped_count
+
+
+def process_files(
+    input_folder: Path,
+    output_folder: Path,
+    move_raw_to_orig: bool,
+    dry_run: bool,
+    interrupt_handler: InterruptHandler,
+    workers: int = DEFAULT_WORKERS,
+) -> tuple[int, int]:
+    """
+    Process and organize photo files.
+
+    Uses a thread pool for parallel file moves (optimized for SSD).
+
+    Returns:
+        A tuple of (success_count, error_count).
+    """
+    files = find_files(input_folder)
+
+    if not files:
+        log.warning(f"No supported files found in: {input_folder}")
+        return 0, 0
+
+    log.info(f"Found {len(files)} files to process")
+    if dry_run:
+        log.warning("DRY RUN MODE — no changes will be made")
+
+    # Get all EXIF dates via exiftool (batched if >5000 files)
+    log.info("Reading EXIF data...")
+    file_dates = get_exif_dates(files)
+    log.info(f"Got EXIF dates for {len(file_dates)}/{len(files)} files")
+
+    # Prepare file info and collect unique date folders
+    log.info("Preparing file operations...")
+    file_infos, date_folders, fallback_count, skipped_count = plan_moves(
+        files, file_dates, output_folder, move_raw_to_orig,
+    )
 
     if fallback_count > 0:
         log.warning(f"Using file modification date for {fallback_count} files (no EXIF data)")

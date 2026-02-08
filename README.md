@@ -1,4 +1,4 @@
-# Photo Organizer
+# Photo Organizer (`rename_and_move_files.py`)
 
 Fast batch photo organization by EXIF date.
 
@@ -66,14 +66,17 @@ brew install exiftool
 
 ## Output structure
 
+By default, **JPEGs go to `!orig/`** and **RAW files stay in the date folder root**.
+With `-r`, RAW files also go to `!orig/`.
+
 ```
 /output/
 ├── 2024_01_15/
-│   ├── !jpg/                    # (created on demand, used downstream)
+│   ├── !jpg/                              # empty, reserved for external JPEG processing tools
 │   ├── !orig/
-│   │   ├── 2024_01_15_143052_IMG_1234.JPG
-│   │   └── 2024_01_15_143052_IMG_1234.CR3   # only with -r
-│   ├── 2024_01_15_143052_IMG_1234.CR3       # without -r
+│   │   ├── 2024_01_15_143052_IMG_1234.JPG # JPEGs always go here
+│   │   └── 2024_01_15_143052_IMG_1234.CR3 # RAW here only with -r
+│   ├── 2024_01_15_143052_IMG_1234.CR3     # RAW here without -r (default)
 │   └── 2024_01_15_143105_IMG_1235.CR3
 ├── 2024_01_16/
 │   └── ...
@@ -83,7 +86,7 @@ brew install exiftool
 
 1. **Scan** — `os.scandir()` finds files with supported extensions
 2. **EXIF** — Batched `exiftool` calls read dates for all files at once
-3. **Fallback** — No EXIF data? Uses the file modification date instead
+3. **Fallback** — No EXIF data? Uses the file modification date instead. If neither is available, the file is skipped with a warning
 4. **Conflicts** — Duplicate filenames get a `_2`, `_3`, etc. suffix
 5. **Move** — `ThreadPoolExecutor` moves files in parallel
 
@@ -100,7 +103,20 @@ brew install exiftool
 - **Missing exiftool** — Clear message with installation instructions
 - **Permission denied** — Logs error, continues with remaining files
 - **Ctrl+C** — Finishes current operations, reports progress
-- **No date** — Skips file with a warning
+- **No EXIF date** — Falls back to file modification date; skips file only if neither is available
+
+## Development
+
+```bash
+# Install dev dependencies
+pip install -e ".[dev]"
+
+# Run tests
+pytest
+
+# Run tests with coverage
+pytest --cov
+```
 
 ## Exit codes
 

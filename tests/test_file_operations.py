@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
+from unittest.mock import patch
 
 from rename_and_move_files import (
     find_files,
@@ -17,16 +19,24 @@ from rename_and_move_files import (
 class TestFindFiles:
     """Tests for find_files function."""
 
-    def test_finds_supported_extensions(self, sample_photos: Path):
-        """Find files with supported extensions."""
+    def test_finds_all_supported_extensions(self, sample_photos: Path):
+        """Find files with all supported extensions."""
         files = find_files(sample_photos)
 
         filenames = {f.name for f in files}
+        # JPEG
         assert "IMG_001.jpg" in filenames
         assert "IMG_002.JPG" in filenames
-        assert "IMG_003.cr3" in filenames
-        assert "IMG_004.CR3" in filenames
-        assert "IMG_005.dng" in filenames
+        assert "IMG_003.jpeg" in filenames
+        # RAW
+        assert "IMG_004.cr3" in filenames
+        assert "IMG_005.CR3" in filenames
+        assert "IMG_006.dng" in filenames
+        assert "IMG_007.arw" in filenames
+        assert "IMG_008.nef" in filenames
+        assert "IMG_009.orf" in filenames
+        assert "IMG_010.raf" in filenames
+        assert "IMG_011.rw2" in filenames
 
     def test_ignores_unsupported_extensions(self, sample_photos: Path):
         """Ignore files with unsupported extensions."""
@@ -35,6 +45,11 @@ class TestFindFiles:
         filenames = {f.name for f in files}
         assert "document.pdf" not in filenames
         assert "notes.txt" not in filenames
+
+    def test_finds_correct_count(self, sample_photos: Path):
+        """Should find exactly 11 supported files (3 JPEG + 8 RAW)."""
+        files = find_files(sample_photos)
+        assert len(files) == 11
 
     def test_empty_directory(self, tmp_path: Path):
         """Empty directory returns empty list."""
@@ -72,12 +87,15 @@ class TestFindFiles:
         filenames = {f.name for f in files}
         assert "hidden.jpg" not in filenames
 
-    def test_nonexistent_directory(self, tmp_path: Path):
-        """Nonexistent directory returns empty list."""
+    def test_nonexistent_directory_returns_empty_and_logs(self, tmp_path: Path):
+        """Nonexistent directory returns empty list and logs error."""
         nonexistent = tmp_path / "does_not_exist"
 
-        files = find_files(nonexistent)
+        with patch("rename_and_move_files.log.error") as mock_error:
+            files = find_files(nonexistent)
+
         assert files == []
+        mock_error.assert_called_once()
 
     def test_case_insensitive_extensions(self, tmp_path: Path):
         """Extension matching should be case-insensitive."""
@@ -130,16 +148,19 @@ class TestMoveSingleFile:
     def test_move_to_subdirectory(self, tmp_path: Path):
         """Move file to a subdirectory."""
         source = tmp_path / "source.jpg"
-        source.touch()
+        source.write_text("photo data")
 
         subdir = tmp_path / "2024_01_15" / "!orig"
         subdir.mkdir(parents=True)
-        dest = subdir / "photo.jpg"
+        dest = subdir / "2024_01_15_143052_source.jpg"
 
         result = move_single_file(source, dest, is_duplicate=False)
 
         assert result.success is True
+        assert result.source_name == "source.jpg"
+        assert result.dest_path == dest
         assert dest.exists()
+        assert dest.read_text() == "photo data"
 
     def test_source_not_found(self, tmp_path: Path):
         """Moving nonexistent file should fail gracefully."""
@@ -162,6 +183,20 @@ class TestMoveSingleFile:
 
         assert result.success is False
         assert result.error is not None
+
+    def test_cross_device_move_falls_back_to_shutil(self, tmp_path: Path):
+        """When os.rename fails with OSError, shutil.move should be used."""
+        source = tmp_path / "source.jpg"
+        source.write_text("cross device content")
+        dest = tmp_path / "dest.jpg"
+
+        with patch("rename_and_move_files.os.rename", side_effect=OSError("cross-device link")):
+            result = move_single_file(source, dest, is_duplicate=False)
+
+        assert result.success is True
+        assert dest.exists()
+        assert dest.read_text() == "cross device content"
+        assert not source.exists()
 
 
 class TestEnsureFoldersExist:
