@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from rename_and_move_files import main
+from rename_and_move_files import main, __version__
 
 
 class TestMain:
@@ -101,3 +101,15 @@ class TestMain:
                 main()
 
         assert output_dir.is_dir()
+
+    def test_version_flag(self, capsys):
+        """--version should print version and exit with code 0."""
+        with patch.object(sys, "argv", ["prog", "-V"]):
+            try:
+                main()
+                assert False, "Should have raised SystemExit"
+            except SystemExit as e:
+                assert e.code == 0
+
+        captured = capsys.readouterr()
+        assert __version__ in captured.out

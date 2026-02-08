@@ -2,7 +2,7 @@
 
 ## Stan po zmianach
 
-- **103 testy**, wszystkie przechodzą (było 57)
+- **108 testów**, wszystkie przechodzą (było 57)
 - Wydzielono `plan_moves()` z `process_files()` — czysta logika routingu jest teraz testowalna bez mocków
 - README naprawione (niespójności, brakujące sekcje)
 - Wszystkie uwagi z pierwszego review zostały zaadresowane
@@ -54,11 +54,17 @@
 
 ---
 
-## Co pozostało (niski priorytet, poza scope)
+## Dodatkowe poprawki (runda 2)
+
+| Zmiana | Status |
+|--------|--------|
+| Dodano `--version` / `-V` do CLI | `__version__ = "1.0.0"` + argparse `action="version"` + test |
+| `validate_date` — walidacja semantyczna | Dodano `strptime` sprawdzający poprawność dat (miesiąc 13, dzień 32, godz 25 → `None`) + 4 testy |
+| Folder `!jpg/` | Potrzebny — zostawiony bez zmian |
+
+## Co pozostało (niski priorytet)
 
 | Uwaga | Komentarz |
 |-------|-----------|
-| Brak `--version` w CLI | Kosmetyczne — `pyproject.toml` ma wersję, ale CLI jej nie pokazuje |
-| Folder `!jpg/` tworzony ale nieużywany | Wyjaśnione w README, ale kod tworzy folder bez zastosowania — do decyzji właściciela |
 | `setup_logging()` wywoływane na poziomie modułu | Efekt uboczny przy importie — utrudnia testowanie logowania, ale nie blokuje |
-| Brak testu `validate_date` z rzeczywistą niepoprawną datą | np. `"2024_13_45_999999"` przechodzi regex ale nie jest poprawną datą — walidacja sprawdza tylko format, nie semantykę |
+| `__version__` zduplikowane z `pyproject.toml` | Można by czytać z `importlib.metadata`, ale dodaje złożoność |

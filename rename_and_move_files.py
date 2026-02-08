@@ -53,6 +53,9 @@ DEFAULT_WORKERS = 8
 # Hard upper limit for parallel workers
 MAX_WORKERS = 64
 
+# Version (keep in sync with pyproject.toml)
+__version__ = "1.0.0"
+
 
 class FileInfo(NamedTuple):
     """Metadata for a single file to be processed."""
@@ -146,10 +149,16 @@ def check_exiftool() -> bool:
 
 
 def validate_date(date_str: str | None) -> str | None:
-    """Validate date string matches the YYYY_MM_DD_HHMMSS format."""
-    if date_str and DATE_PATTERN.match(date_str):
-        return date_str
-    return None
+    """Validate date string matches YYYY_MM_DD_HHMMSS format with valid values."""
+    if not date_str or not DATE_PATTERN.match(date_str):
+        return None
+
+    try:
+        dt.strptime(date_str, "%Y_%m_%d_%H%M%S")
+    except ValueError:
+        return None
+
+    return date_str
 
 
 def _run_exiftool_batch(batch: list[Path]) -> dict[str, str]:
@@ -677,6 +686,11 @@ Supported formats:
         default=DEFAULT_WORKERS,
         metavar="N",
         help=f"Number of parallel workers (default: {DEFAULT_WORKERS}, range: 1-{MAX_WORKERS})",
+    )
+    parser.add_argument(
+        "-V", "--version",
+        action="version",
+        version=f"%(prog)s {__version__}",
     )
 
     args = parser.parse_args()
