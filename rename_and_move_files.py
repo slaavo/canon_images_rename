@@ -1,13 +1,68 @@
 #!/usr/bin/env python3
 """
-Script: rename_and_move_files.py
-Description: Fast batch rename and organize photos by EXIF date.
+rename_and_move_files.py — Batch photo organizer by EXIF date
+==============================================================
 
-Supported formats:
-- RAW: CR3, DNG, ARW (Sony), NEF (Nikon), ORF (Olympus), RAF (Fuji), RW2 (Panasonic)
-- JPEG: JPG, JPEG
+Renames and moves camera image files into date-based folder trees using the
+capture date embedded in EXIF metadata (DateTimeOriginal / CreateDate).
+When EXIF data is missing, the file modification time is used as a fallback.
 
-Requires: Python 3.10+, exiftool
+Output folder structure
+-----------------------
+Each file is placed under a folder named after its capture date:
+
+    <output>/
+        2024_06_15/           <- date folder  (YYYY_MM_DD)
+            2024_06_15_143022_IMG_0042.CR3    <- renamed RAW (default)
+            !jpg/
+                2024_06_15_143022_IMG_0042.JPG
+            !orig/
+                2024_06_15_143022_IMG_0042.CR3  <- if --raw-subfolder is used
+
+File naming convention: YYYY_MM_DD_HHMMSS_<original-stem>.<ext>
+Duplicate names are resolved automatically by appending _2, _3, …
+
+Supported formats
+-----------------
+  RAW : CR3, DNG, ARW (Sony), NEF (Nikon), ORF (Olympus), RAF (Fuji), RW2 (Panasonic)
+  JPEG: JPG, JPEG
+
+Requirements
+------------
+  Python  : 3.10+
+  exiftool: https://exiftool.org
+             Ubuntu/Debian — sudo apt install libimage-exiftool-perl
+             macOS         — brew install exiftool
+
+Usage
+-----
+  rename_and_move_files.py [OPTIONS] [INPUT_FOLDER]
+
+  INPUT_FOLDER              Folder to scan for images (default: current directory)
+
+  -o DIR, --output DIR      Destination root folder (default: same as INPUT_FOLDER)
+  -r, --raw-subfolder       Move RAW files to !orig subfolder instead of the date folder
+  -d, --dry-run             Preview all changes without moving any files
+  -v, --verbose             Print debug-level messages (exiftool warnings, fallback info)
+  -w N, --workers N         Number of parallel move workers (default: 8, range: 1-64)
+                            Tune to your storage: 1-2 for HDD, 8+ for SSD/NVMe
+
+Examples
+--------
+  # Organize photos in the current directory
+  rename_and_move_files.py
+
+  # Organize a specific folder into a separate output location
+  rename_and_move_files.py -o /mnt/nas/sorted /mnt/sdcard/DCIM
+
+  # Preview what would happen (no files are moved)
+  rename_and_move_files.py -d /path/to/photos
+
+  # Move RAW files to !orig and use 16 parallel workers
+  rename_and_move_files.py -r -w 16 /path/to/photos
+
+  # Verbose mode to see which files fall back to modification date
+  rename_and_move_files.py -v /path/to/photos
 """
 
 from __future__ import annotations
