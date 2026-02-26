@@ -99,7 +99,12 @@ class TestUniqueFilenameGenerator:
         assert result == "README_2"
 
     def test_hidden_file(self, tmp_path: Path):
-        """Handle hidden files (starting with dot)."""
+        """Handle hidden files (starting with dot).
+
+        Note: ".hidden" is treated as a file without extension because
+        rfind(".") returns 0 and the condition is `dot_pos > 0`.
+        So the suffix is appended after the full name: ".hidden_2".
+        """
         (tmp_path / ".hidden").touch()
 
         gen = UniqueFilenameGenerator()
