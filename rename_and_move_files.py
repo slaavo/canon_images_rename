@@ -103,7 +103,7 @@ EXIFTOOL_BATCH_SIZE = 5000
 
 # Default number of parallel workers for file operations.
 # 8 is a good default for SSD; use 1-2 for HDD, 8-16 for NVMe.
-DEFAULT_WORKERS = 8
+DEFAULT_WORKERS = 12
 
 # Hard upper limit for parallel workers
 MAX_WORKERS = 64
