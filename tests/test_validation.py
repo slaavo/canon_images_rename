@@ -45,6 +45,23 @@ class TestValidateDate:
         assert validate_date("   ") is None
         assert validate_date("\t\n") is None
 
+    def test_invalid_month(self):
+        """Month 13 should be rejected."""
+        assert validate_date("2024_13_15_143052") is None
+
+    def test_invalid_day(self):
+        """Day 32 should be rejected."""
+        assert validate_date("2024_01_32_143052") is None
+
+    def test_invalid_hour(self):
+        """Hour 25 should be rejected."""
+        assert validate_date("2024_01_15_250000") is None
+
+    def test_invalid_minute_second(self):
+        """Minute 60 or second 60 should be rejected."""
+        assert validate_date("2024_01_15_146000") is None
+        assert validate_date("2024_01_15_140060") is None
+
 
 class TestValidatePaths:
     """Tests for validate_paths function."""

@@ -7,9 +7,16 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from rename_and_move_files import (
+    _run_exiftool_batch,
     get_exif_dates,
     check_exiftool,
     get_file_mod_date,
+    EXIFTOOL_BATCH_SIZE,
+)
+from tests.conftest import (
+    EXIFTOOL_OUTPUT_SINGLE,
+    EXIFTOOL_OUTPUT_MULTIPLE,
+    EXIFTOOL_OUTPUT_FALLBACK,
 )
 
 
@@ -20,10 +27,10 @@ class TestGetExifDates:
         """Empty file list should return empty dict."""
         assert get_exif_dates([]) == {}
 
-    def test_parses_single_file(self, exiftool_output_single: str):
+    def test_parses_single_file(self):
         """Parse exiftool output for a single file."""
         mock_result = MagicMock()
-        mock_result.stdout = exiftool_output_single
+        mock_result.stdout = EXIFTOOL_OUTPUT_SINGLE
         mock_result.stderr = ""
 
         with patch("rename_and_move_files.subprocess.run", return_value=mock_result):
@@ -32,10 +39,10 @@ class TestGetExifDates:
 
         assert dates == {"IMG_001.jpg": "2024_01_15_143052"}
 
-    def test_parses_multiple_files(self, exiftool_output_multiple: str):
+    def test_parses_multiple_files(self):
         """Parse exiftool output for multiple files."""
         mock_result = MagicMock()
-        mock_result.stdout = exiftool_output_multiple
+        mock_result.stdout = EXIFTOOL_OUTPUT_MULTIPLE
         mock_result.stderr = ""
 
         with patch("rename_and_move_files.subprocess.run", return_value=mock_result):
@@ -66,10 +73,10 @@ class TestGetExifDates:
 
         assert dates["IMG.jpg"] == "2024_01_15_100000"
 
-    def test_falls_back_to_create_date(self, exiftool_output_fallback: str):
+    def test_falls_back_to_create_date(self):
         """When DateTimeOriginal is missing, use CreateDate."""
         mock_result = MagicMock()
-        mock_result.stdout = exiftool_output_fallback
+        mock_result.stdout = EXIFTOOL_OUTPUT_FALLBACK
         mock_result.stderr = ""
 
         with patch("rename_and_move_files.subprocess.run", return_value=mock_result):
@@ -99,18 +106,68 @@ class TestGetExifDates:
         assert dates == {}
 
     def test_batching_large_file_list(self):
-        """Files should be processed in batches."""
+        """Files should be processed in batches of EXIFTOOL_BATCH_SIZE."""
         mock_result = MagicMock()
         mock_result.stdout = ""
         mock_result.stderr = ""
 
+        file_count = EXIFTOOL_BATCH_SIZE + 2500
+        expected_batches = 2  # 5000 + 2500
+
         with patch("rename_and_move_files.subprocess.run", return_value=mock_result) as mock_run:
-            # Create 7500 fake files (should be 2 batches with EXIFTOOL_BATCH_SIZE=5000)
-            files = [Path(f"/fake/IMG_{i:05d}.jpg") for i in range(7500)]
+            files = [Path(f"/fake/IMG_{i:05d}.jpg") for i in range(file_count)]
             get_exif_dates(files)
 
-        # Should have been called twice (2 batches)
-        assert mock_run.call_count == 2
+        assert mock_run.call_count == expected_batches
+
+
+class TestRunExiftoolBatch:
+    """Tests for _run_exiftool_batch (internal batch parser)."""
+
+    def test_parses_absolute_path_in_output(self):
+        """exiftool may return absolute paths; only filename should be used."""
+        mock_result = MagicMock()
+        mock_result.stdout = "/long/path/to/IMG.jpg\t2024_01_15_143052\t2024_01_15_143052\n"
+        mock_result.stderr = ""
+
+        with patch("rename_and_move_files.subprocess.run", return_value=mock_result):
+            results = _run_exiftool_batch([Path("/long/path/to/IMG.jpg")])
+
+        assert results == {"IMG.jpg": "2024_01_15_143052"}
+
+    def test_logs_stderr(self):
+        """stderr from exiftool should be logged as debug."""
+        mock_result = MagicMock()
+        mock_result.stdout = "IMG.jpg\t2024_01_15_143052\t2024_01_15_143052\n"
+        mock_result.stderr = "Warning - [minor] some exiftool warning\n"
+
+        with patch("rename_and_move_files.subprocess.run", return_value=mock_result):
+            with patch("rename_and_move_files.log.debug") as mock_debug:
+                _run_exiftool_batch([Path("/fake/IMG.jpg")])
+
+        mock_debug.assert_called_once()
+        assert "exiftool" in mock_debug.call_args[0][0]
+
+    def test_skips_malformed_lines(self):
+        """Lines with fewer than 2 tab-separated fields should be skipped."""
+        mock_result = MagicMock()
+        mock_result.stdout = "malformed_line_no_tabs\n"
+        mock_result.stderr = ""
+
+        with patch("rename_and_move_files.subprocess.run", return_value=mock_result):
+            results = _run_exiftool_batch([Path("/fake/IMG.jpg")])
+
+        assert results == {}
+
+    def test_timeout_returns_empty(self):
+        """Timeout should return empty dict and not raise."""
+        with patch(
+            "rename_and_move_files.subprocess.run",
+            side_effect=subprocess.TimeoutExpired("exiftool", 300),
+        ):
+            results = _run_exiftool_batch([Path("/fake/IMG.jpg")])
+
+        assert results == {}
 
 
 class TestCheckExiftool:
