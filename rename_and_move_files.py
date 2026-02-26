@@ -240,6 +240,12 @@ def _run_exiftool_batch(batch: list[Path]) -> dict[str, str]:
         log.error(f"exiftool timed out after {EXIFTOOL_TIMEOUT} seconds")
         return {}
 
+    if result.returncode != 0:
+        log.warning(
+            f"exiftool returned non-zero exit code {result.returncode} "
+            f"(batch of {len(batch)} files)"
+        )
+
     # Log any stderr output (warnings, errors from exiftool)
     if result.stderr.strip():
         for line in result.stderr.strip().split("\n"):
@@ -544,7 +550,8 @@ def plan_moves(
         else:
             dest_folder = date_folder_path
 
-        base_filename = f"{datetime_str}_{file.stem}{file.suffix}"
+        safe_name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", file.name)
+        base_filename = f"{datetime_str}_{safe_name}"
 
         file_infos.append(FileInfo(
             path=file,

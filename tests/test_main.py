@@ -113,3 +113,31 @@ class TestMain:
 
         captured = capsys.readouterr()
         assert __version__ in captured.out
+
+    def test_exit_code_130_on_interrupt(self, tmp_path: Path):
+        """Return 130 when processing is interrupted by Ctrl+C."""
+        inp = tmp_path / "input"
+        inp.mkdir()
+
+        def mock_process(input_folder, output_folder, move_raw_to_orig, dry_run, interrupt_handler, workers=8):
+            interrupt_handler.interrupted = True
+            return 0, 0
+
+        with patch.object(sys, "argv", ["prog", str(inp)]):
+            with patch("rename_and_move_files.check_exiftool", return_value=True):
+                with patch("rename_and_move_files.process_files", side_effect=mock_process):
+                    result = main()
+
+        assert result == 130
+
+    def test_exit_code_1_on_errors(self, tmp_path: Path):
+        """Return 1 when processing completes with move errors."""
+        inp = tmp_path / "input"
+        inp.mkdir()
+
+        with patch.object(sys, "argv", ["prog", str(inp)]):
+            with patch("rename_and_move_files.check_exiftool", return_value=True):
+                with patch("rename_and_move_files.process_files", return_value=(2, 3)):
+                    result = main()
+
+        assert result == 1
