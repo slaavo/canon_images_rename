@@ -68,3 +68,26 @@
 |-------|-----------|
 | `setup_logging()` wywoływane na poziomie modułu | Efekt uboczny przy importie — utrudnia testowanie logowania, ale nie blokuje |
 | `__version__` zduplikowane z `pyproject.toml` | Można by czytać z `importlib.metadata`, ale dodaje złożoność |
+
+---
+
+## Runda 3 — poprawki po dokładnym review
+
+Po zmianach: **114 testów**, wszystkie przechodzą.
+
+| # | Uwaga | Status |
+|---|-------|--------|
+| 1 | `--dry-run` tworzył katalog wyjściowy mimo „no changes will be made" | Naprawione — `mkdir` korzenia outputu pominięty w dry-run + test `test_dry_run_does_not_create_output_folder` |
+| 3 | `DEFAULT_WORKERS = 12`, a docstring/README/komentarz mówiły „8" | Ujednolicone do 12 (docstring CLI, komentarz przy stałej, README) |
+| 4 | Ścieżka przerwania w pętli kopiowania nieprzetestowana | Dodano test `test_interrupt_cancels_pending_moves` (anulowanie pending tasks) |
+| 5 | Handler sygnału robił I/O (`print` + `log.warning`) | Handler ustawia tylko flagę; komunikaty przeniesione do głównej pętli (async-signal-safe) |
+| 2 | Docstring modułu pokazywał JPEG w `!jpg/`, a kod routuje JPEG do `!orig/` | Poprawiona **tylko dokumentacja** — układ folderów jest zamierzony |
+
+**#2 — decyzja:** układ folderów jest celowy. `!jpg/` jest świadomie rezerwowany (pozostaje pusty) dla zewnętrznych narzędzi do obróbki JPEG; JPEG-i trafiają do `!orig/`. Poprawiono jedynie docstring modułu, który się z tym kłócił.
+
+## Co pozostało (świadome kompromisy)
+
+| Uwaga | Komentarz |
+|-------|-----------|
+| `setup_logging()` na poziomie modułu | Efekt uboczny przy imporcie — zostawione (zmiana komplikuje ergonomię importu) |
+| `__version__` zduplikowane z `pyproject.toml` | Zostawione — `importlib.metadata` dodaje złożoność |

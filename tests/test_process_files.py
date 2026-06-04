@@ -245,3 +245,62 @@ class TestMoveFailure:
 
         assert errors == 1
         assert success == 0
+
+
+class TestInterruptDuringMove:
+    """Test graceful interrupt handling during the parallel move loop."""
+
+    def _make_photos(self, tmp_path: Path) -> tuple[Path, Path]:
+        input_dir = tmp_path / "input"
+        output_dir = tmp_path / "output"
+        input_dir.mkdir()
+        output_dir.mkdir()
+        return input_dir, output_dir
+
+    def _mock_exiftool(self, output: str):
+        mock_result = MagicMock()
+        mock_result.stdout = output
+        mock_result.stderr = ""
+        mock_result.returncode = 0
+        return patch("rename_and_move_files.subprocess.run", return_value=mock_result)
+
+    def test_interrupt_cancels_pending_moves(self, tmp_path: Path):
+        """Setting the interrupt flag mid-batch should cancel pending moves."""
+        input_dir, output_dir = self._make_photos(tmp_path)
+        names = [f"IMG_{i}.jpg" for i in range(5)]
+        for n in names:
+            (input_dir / n).write_text("data")
+
+        exif_output = "".join(
+            f"{n}\t2024_03_10_12000{i}\t2024_03_10_12000{i}\n"
+            for i, n in enumerate(names)
+        )
+
+        handler = InterruptHandler()
+
+        def interrupting_move(source, dest_path, is_duplicate):
+            # Trip the interrupt flag as soon as the first move runs.
+            handler.interrupted = True
+            return MoveResult(
+                success=True, source_name=source.name,
+                dest_path=dest_path, is_duplicate=is_duplicate,
+            )
+
+        with self._mock_exiftool(exif_output):
+            with patch(
+                "rename_and_move_files.move_single_file",
+                side_effect=interrupting_move,
+            ) as mock_move:
+                success, errors = process_files(
+                    input_dir, output_dir,
+                    move_raw_to_orig=False, dry_run=False,
+                    interrupt_handler=handler, workers=1,
+                )
+
+        # The interrupt was observed and the loop broke after the first
+        # completed result instead of reporting all 5 as processed — i.e. the
+        # interrupt stopped the loop early (the remaining results are dropped
+        # and any not-yet-started tasks are cancelled).
+        assert handler.interrupted is True
+        assert success == 1
+        assert errors == 0
