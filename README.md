@@ -61,7 +61,7 @@ brew install exiftool
 | `-o, --output DIR` | Output folder (default: same as input) |
 | `-d, --dry-run` | Preview changes without moving files |
 | `-r, --raw-subfolder` | Move RAW files to `!orig/` (by default only JPEGs) |
-| `-w, --workers N` | Number of parallel workers (default: 8, range: 1-64) |
+| `-w, --workers N` | Number of parallel workers (default: 12, range: 1-64) |
 | `-v, --verbose` | Detailed log output |
 | `-V, --version` | Show version and exit |
 

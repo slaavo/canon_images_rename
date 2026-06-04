@@ -13,11 +13,11 @@ Each file is placed under a folder named after its capture date:
 
     <output>/
         2024_06_15/           <- date folder  (YYYY_MM_DD)
-            2024_06_15_143022_IMG_0042.CR3    <- renamed RAW (default)
-            !jpg/
-                2024_06_15_143022_IMG_0042.JPG
+            2024_06_15_143022_IMG_0042.CR3      <- renamed RAW (default)
             !orig/
-                2024_06_15_143022_IMG_0042.CR3  <- if --raw-subfolder is used
+                2024_06_15_143022_IMG_0042.JPG  <- JPEGs always go here
+                2024_06_15_143022_IMG_0042.CR3  <- RAW here only with --raw-subfolder
+            !jpg/                               <- reserved (kept empty) for external JPEG tools
 
 File naming convention: YYYY_MM_DD_HHMMSS_<original-stem>.<ext>
 Duplicate names are resolved automatically by appending _2, _3, …
@@ -44,7 +44,7 @@ Usage
   -r, --raw-subfolder       Move RAW files to !orig subfolder instead of the date folder
   -d, --dry-run             Preview all changes without moving any files
   -v, --verbose             Print debug-level messages (exiftool warnings, fallback info)
-  -w N, --workers N         Number of parallel move workers (default: 8, range: 1-64)
+  -w N, --workers N         Number of parallel move workers (default: 12, range: 1-64)
                             Tune to your storage: 1-2 for HDD, 8+ for SSD/NVMe
 
 Examples
@@ -102,7 +102,7 @@ EXIFTOOL_TIMEOUT = 300
 EXIFTOOL_BATCH_SIZE = 5000
 
 # Default number of parallel workers for file operations.
-# 8 is a good default for SSD; use 1-2 for HDD, 8-16 for NVMe.
+# 12 is a good default for SSD/NVMe; use 1-2 for HDD.
 DEFAULT_WORKERS = 12
 
 # Hard upper limit for parallel workers
@@ -177,9 +177,10 @@ class InterruptHandler:
             signal.signal(signal.SIGINT, self._original_handler)
 
     def _handler(self, signum: int, frame: FrameType | None) -> None:
+        # Async-signal-safe: only set a flag here. User-facing messaging and
+        # task cancellation happen in the main loop (process_files) to avoid
+        # non-reentrant I/O (print/logging) inside a signal handler.
         self.interrupted = True
-        print()  # Newline after progress bar
-        log.warning("Interrupt received. Finishing current operation...")
 
 
 def check_exiftool() -> bool:
@@ -550,6 +551,8 @@ def plan_moves(
         else:
             dest_folder = date_folder_path
 
+        # Replace characters illegal on Windows/macOS so output names are
+        # portable across filesystems (also rewrites a few chars legal on Linux).
         safe_name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", file.name)
         base_filename = f"{datetime_str}_{safe_name}"
 
@@ -676,6 +679,8 @@ def process_files(
                 # Check for interrupt AFTER processing the current result.
                 # cancel() only affects tasks not yet started by the pool.
                 if interrupt_handler.interrupted:
+                    print()  # Newline after progress bar
+                    log.warning("Interrupt received. Finishing current operations...")
                     pending = sum(1 for f in future_to_task if not f.done())
                     if pending > 0:
                         log.warning(f"Cancelling {pending} pending tasks...")
@@ -781,7 +786,9 @@ Supported formats:
     if not validate_paths(input_folder, output_folder):
         return 1
 
-    output_folder.mkdir(parents=True, exist_ok=True)
+    # Skip creating the output root in dry-run mode to keep it side-effect-free.
+    if not args.dry_run:
+        output_folder.mkdir(parents=True, exist_ok=True)
 
     with InterruptHandler() as interrupt_handler:
         success, errors = process_files(

@@ -141,3 +141,16 @@ class TestMain:
                     result = main()
 
         assert result == 1
+
+    def test_dry_run_does_not_create_output_folder(self, tmp_path: Path):
+        """Dry run must not create the output folder (no side effects)."""
+        input_dir = tmp_path / "input"
+        input_dir.mkdir()
+        output_dir = tmp_path / "new_output"
+
+        with patch.object(sys, "argv", ["prog", "-d", "-o", str(output_dir), str(input_dir)]):
+            with patch("rename_and_move_files.check_exiftool", return_value=True):
+                result = main()
+
+        assert result == 0
+        assert not output_dir.exists()
