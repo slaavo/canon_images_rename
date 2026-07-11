@@ -39,13 +39,16 @@ SessionStart hook) installs both automatically. The test suite mocks
 function:
 
 1. `find_files()` — `os.scandir()` for supported extensions (no recursion),
-   sorted case-insensitively.
-2. `get_exif_dates()` — one `exiftool` call per batch of `EXIFTOOL_BATCH_SIZE`
-   files (batching keeps argv under the OS `ARG_MAX`); `_run_exiftool_batch()`
-   parses the tab-separated output and prefers DateTimeOriginal over CreateDate.
-3. `plan_moves()` — **pure** routing function (no I/O except the mtime fallback).
-   Decides each file's destination folder and new name. Keep it pure so routing
-   stays unit-testable without mocks.
+   sorted case-insensitively. Returns `ScannedFile` tuples carrying the
+   formatted mtime (from scandir's cached stat) for the fallback date.
+2. `get_exif_dates()` — one `exiftool -fast2` call per batch of
+   `EXIFTOOL_BATCH_SIZE` files (batching keeps argv under the OS `ARG_MAX`;
+   multiple batches run in parallel, capped at `EXIFTOOL_MAX_PARALLEL`);
+   `_run_exiftool_batch()` parses the tab-separated output and prefers
+   DateTimeOriginal over CreateDate.
+3. `plan_moves()` — **pure** routing function (no I/O; the mtime fallback uses
+   `ScannedFile.mtime_date`). Decides each file's destination folder and new
+   name. Keep it pure so routing stays unit-testable without mocks.
 4. `ensure_folders_exist()` — pre-creates all date folders and their subfolders.
 5. `UniqueFilenameGenerator` — resolves name collisions (`_2`, `_3`, …) against
    both on-disk files and names already allocated this run. Runs sequentially

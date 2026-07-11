@@ -10,7 +10,6 @@ from rename_and_move_files import (
     _run_exiftool_batch,
     get_exif_dates,
     check_exiftool,
-    get_file_mod_date,
     EXIFTOOL_BATCH_SIZE,
 )
 from tests.conftest import (
@@ -120,9 +119,41 @@ class TestGetExifDates:
 
         assert mock_run.call_count == expected_batches
 
+    def test_multiple_batches_merge_results(self):
+        """Results from all (parallel) batches should be merged into one dict."""
+        batch_results = [
+            {"IMG_A.jpg": "2024_01_15_100000"},
+            {"IMG_B.jpg": "2024_01_16_110000"},
+        ]
+
+        with patch(
+            "rename_and_move_files._run_exiftool_batch",
+            side_effect=batch_results,
+        ):
+            files = [Path(f"/fake/IMG_{i:05d}.jpg") for i in range(EXIFTOOL_BATCH_SIZE + 1)]
+            dates = get_exif_dates(files)
+
+        assert dates == {
+            "IMG_A.jpg": "2024_01_15_100000",
+            "IMG_B.jpg": "2024_01_16_110000",
+        }
+
 
 class TestRunExiftoolBatch:
     """Tests for _run_exiftool_batch (internal batch parser)."""
+
+    def test_uses_fast2_flag(self):
+        """exiftool should be invoked with -fast2 (skip trailer/maker-note scan)."""
+        mock_result = MagicMock()
+        mock_result.stdout = ""
+        mock_result.stderr = ""
+
+        with patch("rename_and_move_files.subprocess.run", return_value=mock_result) as mock_run:
+            _run_exiftool_batch([Path("/fake/IMG.jpg")])
+
+        argv = mock_run.call_args[0][0]
+        assert argv[0] == "exiftool"
+        assert "-fast2" in argv
 
     def test_parses_absolute_path_in_output(self):
         """exiftool may return absolute paths; only filename should be used."""
@@ -204,29 +235,3 @@ class TestCheckExiftool:
             side_effect=subprocess.TimeoutExpired("exiftool", 10),
         ):
             assert check_exiftool() is False
-
-
-class TestGetFileModDate:
-    """Tests for get_file_mod_date function."""
-
-    def test_returns_formatted_date(self, tmp_path: Path):
-        """Return modification date in correct format."""
-        test_file = tmp_path / "test.jpg"
-        test_file.touch()
-
-        result = get_file_mod_date(test_file)
-
-        # Should match YYYY_MM_DD_HHMMSS format
-        assert result is not None
-        assert len(result) == 17
-        assert result[4] == "_"
-        assert result[7] == "_"
-        assert result[10] == "_"
-
-    def test_nonexistent_file_returns_none(self, tmp_path: Path):
-        """Return None for nonexistent file."""
-        nonexistent = tmp_path / "does_not_exist.jpg"
-
-        result = get_file_mod_date(nonexistent)
-
-        assert result is None

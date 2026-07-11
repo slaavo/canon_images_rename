@@ -101,6 +101,9 @@ EXIFTOOL_TIMEOUT = 300
 # Prevents hitting OS ARG_MAX (~2 MB on Linux) with long paths.
 EXIFTOOL_BATCH_SIZE = 5000
 
+# Max concurrent exiftool processes when more than one batch is needed
+EXIFTOOL_MAX_PARALLEL = 4
+
 # Default number of parallel workers for file operations.
 # 12 is a good default for SSD/NVMe; use 1-2 for HDD.
 DEFAULT_WORKERS = 12
@@ -109,7 +112,18 @@ DEFAULT_WORKERS = 12
 MAX_WORKERS = 64
 
 # Version (keep in sync with pyproject.toml)
-__version__ = "1.0.0"
+__version__ = "1.1.0"
+
+
+class ScannedFile(NamedTuple):
+    """A file found during the directory scan.
+
+    mtime_date is the modification time already formatted as
+    YYYY_MM_DD_HHMMSS (captured from scandir's cached stat), or None if
+    stat failed. It serves as the fallback when EXIF has no date.
+    """
+    path: Path
+    mtime_date: str | None
 
 
 class FileInfo(NamedTuple):
@@ -226,10 +240,13 @@ def _run_exiftool_batch(batch: list[Path]) -> dict[str, str]:
     results: dict[str, str] = {}
 
     try:
-        # -d (date format) must come before the tags it applies to
+        # -d (date format) must come before the tags it applies to.
+        # -fast2 skips the JPEG trailer scan and maker notes — safe here
+        # because DateTimeOriginal/CreateDate live in the standard EXIF/
+        # QuickTime blocks near the start of the file.
         result = subprocess.run(
             [
-                "exiftool", "-T",
+                "exiftool", "-T", "-fast2",
                 "-d", "%Y_%m_%d_%H%M%S",
                 "-filename", "-DateTimeOriginal", "-CreateDate",
             ] + [str(f) for f in batch],
@@ -280,38 +297,44 @@ def get_exif_dates(files: list[Path]) -> dict[str, str]:
     Get dates for all files via exiftool.
 
     Splits into batches of EXIFTOOL_BATCH_SIZE to stay within
-    OS argument length limits (ARG_MAX).
+    OS argument length limits (ARG_MAX). Multiple batches run in
+    parallel (exiftool is single-threaded, so concurrent processes
+    overlap CPU and I/O on very large folders).
 
     Returns a dict mapping filename -> formatted date string.
     """
     if not files:
         return {}
 
+    batches = [
+        files[i : i + EXIFTOOL_BATCH_SIZE]
+        for i in range(0, len(files), EXIFTOOL_BATCH_SIZE)
+    ]
+
     file_dates: dict[str, str] = {}
 
-    for i in range(0, len(files), EXIFTOOL_BATCH_SIZE):
-        batch = files[i : i + EXIFTOOL_BATCH_SIZE]
-        file_dates.update(_run_exiftool_batch(batch))
+    if len(batches) == 1:
+        file_dates.update(_run_exiftool_batch(batches[0]))
+        return file_dates
+
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=min(EXIFTOOL_MAX_PARALLEL, len(batches))
+    ) as executor:
+        for batch_result in executor.map(_run_exiftool_batch, batches):
+            file_dates.update(batch_result)
 
     return file_dates
 
 
-def get_file_mod_date(file: Path) -> str | None:
-    """Get the file modification date as a formatted string (fallback)."""
-    try:
-        mtime = file.stat().st_mtime
-        return dt.fromtimestamp(mtime).strftime("%Y_%m_%d_%H%M%S")
-    except OSError:
-        return None
-
-
-def find_files(input_folder: Path) -> list[Path]:
+def find_files(input_folder: Path) -> list[ScannedFile]:
     """
     Find all supported image files in the given folder.
 
-    Uses os.scandir() for efficiency (cached stat results).
+    Uses os.scandir() for efficiency (cached stat results). The mtime is
+    captured here — from the same cached stat — so later stages never need
+    to touch the filesystem for the fallback date.
     """
-    files: list[Path] = []
+    files: list[ScannedFile] = []
 
     try:
         with os.scandir(input_folder) as entries:
@@ -319,7 +342,12 @@ def find_files(input_folder: Path) -> list[Path]:
                 # entry.is_file() uses cached stat from scandir
                 _, ext = os.path.splitext(entry.name)
                 if entry.is_file() and ext.lower() in ALL_EXTENSIONS:
-                    files.append(Path(entry.path))
+                    try:
+                        mtime = entry.stat().st_mtime
+                        mtime_date = dt.fromtimestamp(mtime).strftime("%Y_%m_%d_%H%M%S")
+                    except OSError:
+                        mtime_date = None
+                    files.append(ScannedFile(Path(entry.path), mtime_date))
     except PermissionError as e:
         log.error(f"Permission denied: {e}")
         return []
@@ -328,7 +356,7 @@ def find_files(input_folder: Path) -> list[Path]:
         return []
 
     # Sort for deterministic order (casefold for better Unicode handling)
-    files.sort(key=lambda f: f.name.casefold())
+    files.sort(key=lambda f: f.path.name.casefold())
     return files
 
 
@@ -502,7 +530,7 @@ def validate_paths(input_folder: Path, output_folder: Path) -> bool:
 
 
 def plan_moves(
-    files: list[Path],
+    files: list[ScannedFile],
     file_dates: dict[str, str],
     output_folder: Path,
     move_raw_to_orig: bool,
@@ -510,7 +538,8 @@ def plan_moves(
     """
     Build FileInfo list and collect date folders.
 
-    Pure function — no I/O except get_file_mod_date fallback.
+    Pure function — no I/O. The mtime fallback uses the date captured
+    during the directory scan (ScannedFile.mtime_date).
 
     Returns:
         (file_infos, date_folders, fallback_count, skipped_count)
@@ -520,12 +549,12 @@ def plan_moves(
     skipped_count = 0
     fallback_count = 0
 
-    for file in files:
+    for file, mtime_date in files:
         datetime_str = file_dates.get(file.name)
         used_fallback = False
 
         if not datetime_str:
-            datetime_str = get_file_mod_date(file)
+            datetime_str = mtime_date
             if datetime_str:
                 used_fallback = True
                 fallback_count += 1
@@ -594,7 +623,7 @@ def process_files(
 
     # Get all EXIF dates via exiftool (batched if >5000 files)
     log.info("Reading EXIF data...")
-    file_dates = get_exif_dates(files)
+    file_dates = get_exif_dates([f.path for f in files])
     log.info(f"Got EXIF dates for {len(file_dates)}/{len(files)} files")
 
     # Prepare file info and collect unique date folders

@@ -91,3 +91,19 @@ Po zmianach: **114 testów**, wszystkie przechodzą.
 |-------|-----------|
 | `setup_logging()` na poziomie modułu | Efekt uboczny przy imporcie — zostawione (zmiana komplikuje ergonomię importu) |
 | `__version__` zduplikowane z `pyproject.toml` | Zostawione — `importlib.metadata` dodaje złożoność |
+
+---
+
+## Runda 4 — optymalizacja architektury i wydajności
+
+Po zmianach: **116 testów**, wszystkie przechodzą. Wersja podbita do **1.1.0**.
+
+| # | Zmiana | Szczegóły |
+|---|--------|-----------|
+| 1 | `exiftool -fast2` | Pomija skan trailera JPEG i maker notes — czytamy tylko DateTimeOriginal/CreateDate (standardowe bloki EXIF/QuickTime na początku pliku). Największy realny zysk na folderach z JPEG (karta SD, NAS). Test `test_uses_fast2_flag`. |
+| 2 | `plan_moves()` w pełni czysta | Nowy `ScannedFile(path, mtime_date)` — mtime formatowany już w `find_files()` z cache'owanego stat-a scandir. Usunięto `get_file_mod_date()` (jeden `stat()` mniej na plik bez EXIF), testy routingu nie potrzebują żadnych mocków (usunięty mock z `test_skips_file_without_any_date`). Nowy test `test_no_io_for_nonexistent_paths`. |
+| 3 | Równoległe batche exiftool | Przy >`EXIFTOOL_BATCH_SIZE` (5000) plików batche idą przez `ThreadPoolExecutor` (max `EXIFTOOL_MAX_PARALLEL = 4` procesy). Ścieżka jedno-batchowa bez zmian. Test `test_multiple_batches_merge_results`. |
+
+Weryfikacja end-to-end z prawdziwym exiftool: pliki z `DateTimeOriginal` trafiają do
+`YYYY_MM_DD/!orig/` z poprawną nazwą (`-fast2` nadal wyciąga daty), plik bez EXIF
+używa mtime, `!jpg/` tworzony i pusty, dry-run bez efektów ubocznych.
