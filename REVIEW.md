@@ -107,3 +107,30 @@ Po zmianach: **116 testów**, wszystkie przechodzą. Wersja podbita do **1.1.0**
 Weryfikacja end-to-end z prawdziwym exiftool: pliki z `DateTimeOriginal` trafiają do
 `YYYY_MM_DD/!orig/` z poprawną nazwą (`-fast2` nadal wyciąga daty), plik bez EXIF
 używa mtime, `!jpg/` tworzony i pusty, dry-run bez efektów ubocznych.
+
+---
+
+## Runda 5 — uwaga z GitHub: `-fast2` a CR3 (kontener QuickTime)
+
+**Uwaga (PR #8):** dla CR3, których metadane QuickTime leżą *za* danymi obrazu,
+`-fast2` może pominąć DateTimeOriginal/CreateDate i po cichu wpaść na fallback
+mtime — zdjęcie ląduje pod złą datą. Dokumentacja ExifTool: `-fast2` „stops
+processing at … the mdat atom of QuickTime-format files”.
+
+**Potwierdzenie w źródłach ExifTool 12.76:** `QuickTime.pm:9505` —
+`last if $fast > 1 and $tag eq 'mdat'`; `ExifTool.pm:268` — CR3 czytany przez
+parser MOV/QuickTime. Poziom `-fast` (1) nie uruchamia tego skrótu.
+
+| # | Zmiana | Szczegóły |
+|---|--------|-----------|
+| 1 | `QUICKTIME_EXTENSIONS = {".cr3"}` | Formaty w kontenerze ISOBMFF/QuickTime — czytane z `-fast` zamiast `-fast2`. |
+| 2 | `_run_exiftool_batch(batch, fast_flag)` | Flaga `-fast*` jako parametr; usunięty mylący komentarz o „bezpieczeństwie” `-fast2`. |
+| 3 | `get_exif_dates()` grupuje po fladze | Pliki dzielone na grupy `-fast2` (JPEG, TIFF-owe RAW) i `-fast` (CR3), potem na batche; folder CR3+JPG to dwa równoległe wywołania exiftool (istniejący pool), więc czas ścienny nie rośnie. |
+| 4 | Testy | `test_jpeg_uses_fast2_flag`, `test_quicktime_raw_uses_fast_not_fast2`, `test_mixed_cr3_and_jpeg_use_separate_invocations`, `test_passes_fast_flag_to_exiftool`. |
+
+**Reprodukcja na prawdziwym exiftool:** syntetyczny plik `.cr3` (ftyp `crx `,
+`mdat`, dopiero potem `moov/mvhd` z creation_time). `exiftool -fast2` → brak
+daty; `exiftool -fast` → `2024_06_15_143022`. Po poprawce narzędzie umieszcza
+taki plik pod datą QuickTime, a nie pod mtime (sprawdzone dry-run + realny run).
+
+Bez podbicia wersji — 1.1.0 nie została jeszcze wydana (ta sama gałąź / PR #8).

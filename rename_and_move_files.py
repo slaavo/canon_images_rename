@@ -91,6 +91,11 @@ RAW_EXTENSIONS: frozenset[str] = frozenset({".cr3", ".dng", ".arw", ".nef", ".or
 JPEG_EXTENSIONS: frozenset[str] = frozenset({".jpg", ".jpeg"})
 ALL_EXTENSIONS: frozenset[str] = RAW_EXTENSIONS | JPEG_EXTENSIONS
 
+# Formats stored in an ISOBMFF/QuickTime container. ExifTool's -fast2 stops
+# parsing these at the mdat atom, so metadata stored after the media data
+# (possible in CR3) would be missed; such files are read with -fast instead.
+QUICKTIME_EXTENSIONS: frozenset[str] = frozenset({".cr3"})
+
 # Date format pattern for validation
 DATE_PATTERN = re.compile(r"^\d{4}_\d{2}_\d{2}_\d{6}$")
 
@@ -231,22 +236,23 @@ def validate_date(date_str: str | None) -> str | None:
     return date_str
 
 
-def _run_exiftool_batch(batch: list[Path]) -> dict[str, str]:
+def _run_exiftool_batch(batch: list[Path], fast_flag: str) -> dict[str, str]:
     """
     Run exiftool on a single batch of files.
+
+    fast_flag is "-fast2" (skips JPEG trailer + maker notes; safe for JPEG
+    and TIFF-based RAW) or "-fast" (QuickTime containers, where -fast2
+    would stop at mdat and could miss the date tags).
 
     Returns a dict mapping filename -> formatted date string.
     """
     results: dict[str, str] = {}
 
     try:
-        # -d (date format) must come before the tags it applies to.
-        # -fast2 skips the JPEG trailer scan and maker notes — safe here
-        # because DateTimeOriginal/CreateDate live in the standard EXIF/
-        # QuickTime blocks near the start of the file.
+        # -d (date format) must come before the tags it applies to
         result = subprocess.run(
             [
-                "exiftool", "-T", "-fast2",
+                "exiftool", "-T", fast_flag,
                 "-d", "%Y_%m_%d_%H%M%S",
                 "-filename", "-DateTimeOriginal", "-CreateDate",
             ] + [str(f) for f in batch],
@@ -292,35 +298,50 @@ def _run_exiftool_batch(batch: list[Path]) -> dict[str, str]:
     return results
 
 
+def _exiftool_fast_flag(file: Path) -> str:
+    """Pick the exiftool -fast level that is safe for this file's container."""
+    if file.suffix.lower() in QUICKTIME_EXTENSIONS:
+        return "-fast"
+    return "-fast2"
+
+
 def get_exif_dates(files: list[Path]) -> dict[str, str]:
     """
     Get dates for all files via exiftool.
 
-    Splits into batches of EXIFTOOL_BATCH_SIZE to stay within
-    OS argument length limits (ARG_MAX). Multiple batches run in
-    parallel (exiftool is single-threaded, so concurrent processes
-    overlap CPU and I/O on very large folders).
+    Files are grouped by the -fast level their container allows (see
+    QUICKTIME_EXTENSIONS), then split into batches of EXIFTOOL_BATCH_SIZE
+    to stay within OS argument length limits (ARG_MAX). Multiple batches
+    run in parallel (exiftool is single-threaded, so concurrent processes
+    overlap CPU and I/O).
 
     Returns a dict mapping filename -> formatted date string.
     """
     if not files:
         return {}
 
+    groups: dict[str, list[Path]] = {}
+    for file in files:
+        groups.setdefault(_exiftool_fast_flag(file), []).append(file)
+
     batches = [
-        files[i : i + EXIFTOOL_BATCH_SIZE]
-        for i in range(0, len(files), EXIFTOOL_BATCH_SIZE)
+        (group[i : i + EXIFTOOL_BATCH_SIZE], fast_flag)
+        for fast_flag, group in groups.items()
+        for i in range(0, len(group), EXIFTOOL_BATCH_SIZE)
     ]
 
     file_dates: dict[str, str] = {}
 
     if len(batches) == 1:
-        file_dates.update(_run_exiftool_batch(batches[0]))
+        batch, fast_flag = batches[0]
+        file_dates.update(_run_exiftool_batch(batch, fast_flag))
         return file_dates
 
     with concurrent.futures.ThreadPoolExecutor(
         max_workers=min(EXIFTOOL_MAX_PARALLEL, len(batches))
     ) as executor:
-        for batch_result in executor.map(_run_exiftool_batch, batches):
+        results = executor.map(lambda b: _run_exiftool_batch(*b), batches)
+        for batch_result in results:
             file_dates.update(batch_result)
 
     return file_dates

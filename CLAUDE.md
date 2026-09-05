@@ -41,11 +41,13 @@ function:
 1. `find_files()` — `os.scandir()` for supported extensions (no recursion),
    sorted case-insensitively. Returns `ScannedFile` tuples carrying the
    formatted mtime (from scandir's cached stat) for the fallback date.
-2. `get_exif_dates()` — one `exiftool -fast2` call per batch of
-   `EXIFTOOL_BATCH_SIZE` files (batching keeps argv under the OS `ARG_MAX`;
-   multiple batches run in parallel, capped at `EXIFTOOL_MAX_PARALLEL`);
-   `_run_exiftool_batch()` parses the tab-separated output and prefers
-   DateTimeOriginal over CreateDate.
+2. `get_exif_dates()` — groups files by the exiftool `-fast` level their
+   container allows (`-fast2` for JPEG/TIFF-based RAW, `-fast` for the
+   QuickTime-backed formats in `QUICKTIME_EXTENSIONS`, i.e. CR3), then runs one
+   exiftool call per batch of `EXIFTOOL_BATCH_SIZE` files (batching keeps argv
+   under the OS `ARG_MAX`; multiple batches run in parallel, capped at
+   `EXIFTOOL_MAX_PARALLEL`); `_run_exiftool_batch()` parses the tab-separated
+   output and prefers DateTimeOriginal over CreateDate.
 3. `plan_moves()` — **pure** routing function (no I/O; the mtime fallback uses
    `ScannedFile.mtime_date`). Decides each file's destination folder and new
    name. Keep it pure so routing stays unit-testable without mocks.
@@ -72,6 +74,11 @@ flag; the move loop checks it and cancels not-yet-started tasks. Output naming i
 - `__version__` in `rename_and_move_files.py` is hand-synced with the version in
   `pyproject.toml`.
 - `--dry-run` must stay fully side-effect-free: no folders created, no moves.
+- **Never read CR3 with exiftool `-fast2` (or higher).** CR3 is a QuickTime
+  container and `-fast2` stops parsing at the `mdat` atom, so a file whose
+  `moov` sits after the media data loses its date and gets silently filed by
+  mtime. `QUICKTIME_EXTENSIONS` keeps those on `-fast`; `-fast2` is only safe
+  for JPEG and TIFF-based RAW.
 - No linter is configured; the bar is a green `pytest` run.
 - `REVIEW.md` is a running log of review rounds — append a new section rather
   than rewriting past ones.
