@@ -5,7 +5,12 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from rename_and_move_files import process_files, InterruptHandler, MoveResult
+from rename_and_move_files import (
+    ExifToolError,
+    InterruptHandler,
+    MoveResult,
+    process_files,
+)
 
 
 class TestProcessFiles:
@@ -304,3 +309,73 @@ class TestInterruptDuringMove:
         assert handler.interrupted is True
         assert success == 1
         assert errors == 0
+
+
+class TestExifReadFailure:
+    """exiftool failure or an interrupt during the EXIF scan must move nothing."""
+
+    def _make_photos(self, tmp_path: Path) -> tuple[Path, Path]:
+        input_dir = tmp_path / "input"
+        output_dir = tmp_path / "output"
+        input_dir.mkdir()
+        output_dir.mkdir()
+        (input_dir / "photo.jpg").write_text("data")
+        return input_dir, output_dir
+
+    def test_exiftool_failure_moves_nothing(self, tmp_path: Path):
+        """A timeout/killed exiftool is an error; no mtime fallback, no moves."""
+        input_dir, output_dir = self._make_photos(tmp_path)
+
+        with patch(
+            "rename_and_move_files.get_exif_dates",
+            side_effect=ExifToolError("exiftool timed out"),
+        ):
+            handler = InterruptHandler()
+            success, errors = process_files(
+                input_dir, output_dir,
+                move_raw_to_orig=False, dry_run=False,
+                interrupt_handler=handler, workers=1,
+            )
+
+        assert (success, errors) == (0, 1)
+        assert (input_dir / "photo.jpg").exists()
+        assert list(output_dir.iterdir()) == []
+
+    def test_interrupt_during_exif_read_moves_nothing(self, tmp_path: Path):
+        """Ctrl+C during the EXIF scan stops before any folder is created."""
+        input_dir, output_dir = self._make_photos(tmp_path)
+        handler = InterruptHandler()
+
+        def interrupting_exif(files):
+            handler.interrupted = True
+            return {"photo.jpg": "2024_01_15_143052"}
+
+        with patch("rename_and_move_files.get_exif_dates", side_effect=interrupting_exif):
+            success, errors = process_files(
+                input_dir, output_dir,
+                move_raw_to_orig=False, dry_run=False,
+                interrupt_handler=handler, workers=1,
+            )
+
+        assert (success, errors) == (0, 0)
+        assert (input_dir / "photo.jpg").exists()
+        assert list(output_dir.iterdir()) == []
+
+    def test_interrupt_that_kills_exiftool_is_not_an_error(self, tmp_path: Path):
+        """Ctrl+C kills the exiftool child too; report an interrupt, not a failure."""
+        input_dir, output_dir = self._make_photos(tmp_path)
+        handler = InterruptHandler()
+
+        def killed_exif(files):
+            handler.interrupted = True
+            raise ExifToolError("exiftool failed with exit code -2")
+
+        with patch("rename_and_move_files.get_exif_dates", side_effect=killed_exif):
+            success, errors = process_files(
+                input_dir, output_dir,
+                move_raw_to_orig=False, dry_run=False,
+                interrupt_handler=handler, workers=1,
+            )
+
+        assert (success, errors) == (0, 0)
+        assert list(output_dir.iterdir()) == []

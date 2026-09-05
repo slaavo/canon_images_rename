@@ -134,3 +134,31 @@ daty; `exiftool -fast` → `2024_06_15_143022`. Po poprawce narzędzie umieszcza
 taki plik pod datą QuickTime, a nie pod mtime (sprawdzone dry-run + realny run).
 
 Bez podbicia wersji — 1.1.0 nie została jeszcze wydana (ta sama gałąź / PR #8).
+
+
+---
+
+## Runda 6 — druga tura review PR #8 (7 uwag)
+
+Po zmianach: wszystkie testy przechodzą (patrz liczba w commicie). Bez podbicia
+wersji — 1.1.0 nadal niewydana na tej gałęzi.
+
+Ocena: **wszystkie 7 uwag prawdziwe**, o bardzo różnym prawdopodobieństwie.
+Najgroźniejsza w praktyce była para #3+#4: Ctrl+C w trakcie skanu EXIF zabija
+proces exiftool, skrypt dostawał pusty słownik, ostrzegał „using file
+modification date" i przenosił wszystko według mtime.
+
+| # | Uwaga | Prawdziwa? | Prawdop. | Poprawka |
+|---|-------|-----------|----------|----------|
+| 1 | `os.rename` nadpisuje plik utworzony po skanie nazw (utrata danych) | tak | niskie | `_move_no_clobber()`: `os.link`+`unlink` (atomowo odmawia, gdy cel istnieje); na FS bez hardlinków (FAT/exFAT) placeholder `O_EXCL` + `os.replace`; między urządzeniami kopia z ekskluzywnym utworzeniem pliku. `FileExistsError` → błąd, nigdy nadpisanie. |
+| 2 | Katalog o nazwie pliku docelowego → `shutil.move` wrzuca zdjęcie do niego | tak | znikome | `_get_existing()` liczy każdy wpis katalogu; `shutil.move` usunięty z ścieżki przenoszenia. |
+| 3 | Timeout exiftool → `{}` → wszystko po mtime | tak | średnie | `ExifToolError` przy timeoucie, kodzie < 0 (sygnał) lub kodzie ≠ 0 bez wyjścia; `process_files()` przerywa **przed** jakimkolwiek przeniesieniem, exit 1. Kod ≠ 0 *z* wyjściem = częściowy sukces exiftool (sprawdzone: brakujący plik → rc=1, reszta wypisana) → tylko ostrzeżenie. |
+| 4 | Ctrl+C w trakcie skanu EXIF nie zatrzymuje przenoszenia | tak | **wysokie** | Flaga sprawdzana zaraz po skanie EXIF, przed `ensure_folders_exist()`; zabity exiftool przy ustawionej fladze raportowany jako przerwanie (exit 130), nie awaria. |
+| 5 | Symlinki traktowane jak zdjęcia | tak | niskie | `find_files()` pomija `entry.is_symlink()` (debug per link + jedno ostrzeżenie zbiorcze). |
+| 6 | Limit 5000 plików nie ogranicza bajtów argv (Linux 2 MiB, macOS 1 MiB, Windows ~32K znaków) | tak | średnie | Lista plików idzie na stdin przez `-@ -` (sprawdzone na exiftool 12.76); `EXIFTOOL_BATCH_SIZE` zostaje jako granica pracy jednego procesu i jednostka równoległości. Ścieżka z `\n` pomijana z ostrzeżeniem. |
+| 7 | `PermissionError` przy skanie → „brak plików" → exit 0 | tak | średnie | `find_files()` rzuca `ScanError`; `main()` zwraca 1. |
+
+Nowe testy: odmowa nadpisania (link / EXDEV / EPERM), katalog jako kolizja,
+brak placeholdera po nieudanym przenoszeniu, symlinki, `ScanError`,
+`ExifToolError` (timeout, kod -2, kod 1 bez wyjścia) vs częściowy sukces,
+`-@ -` na stdin, przerwanie podczas skanu EXIF, exit 1 z `main()`.

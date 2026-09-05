@@ -6,6 +6,7 @@ rename_and_move_files.py — Batch photo organizer by EXIF date
 Renames and moves camera image files into date-based folder trees using the
 capture date embedded in EXIF metadata (DateTimeOriginal / CreateDate).
 When EXIF data is missing, the file modification time is used as a fallback.
+Symbolic links are skipped, and existing files are never overwritten.
 
 Output folder structure
 -----------------------
@@ -70,6 +71,7 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import copy
+import errno
 import logging
 import os
 import re
@@ -102,8 +104,9 @@ DATE_PATTERN = re.compile(r"^\d{4}_\d{2}_\d{2}_\d{6}$")
 # Timeout for exiftool subprocess (seconds)
 EXIFTOOL_TIMEOUT = 300
 
-# Max number of files per single exiftool invocation.
-# Prevents hitting OS ARG_MAX (~2 MB on Linux) with long paths.
+# Max number of files per single exiftool invocation. File lists are passed
+# on stdin (-@ -), so this is not an ARG_MAX guard; it bounds the work (and
+# the timeout window) of one exiftool process and enables parallel batches.
 EXIFTOOL_BATCH_SIZE = 5000
 
 # Max concurrent exiftool processes when more than one batch is needed
@@ -118,6 +121,14 @@ MAX_WORKERS = 64
 
 # Version (keep in sync with pyproject.toml)
 __version__ = "1.1.0"
+
+
+class ScanError(RuntimeError):
+    """The input folder could not be scanned (permissions, I/O error)."""
+
+
+class ExifToolError(RuntimeError):
+    """exiftool did not complete: timeout, killed by a signal, or no output with a non-zero exit."""
 
 
 class ScannedFile(NamedTuple):
@@ -245,38 +256,70 @@ def _run_exiftool_batch(batch: list[Path], fast_flag: str) -> dict[str, str]:
     would stop at mdat and could miss the date tags).
 
     Returns a dict mapping filename -> formatted date string.
+
+    Raises ExifToolError if exiftool timed out, was killed by a signal, or
+    exited non-zero without producing any output. A non-zero exit *with*
+    output is exiftool's normal "some files had errors" and is only logged.
     """
     results: dict[str, str] = {}
 
+    # An arg file cannot express a newline inside a path; such files are
+    # left to the mtime fallback.
+    paths: list[str] = []
+    for f in batch:
+        if "\n" in str(f):
+            log.warning(f"Skipping EXIF read for path containing a newline: {f.name!r}")
+            continue
+        paths.append(str(f))
+    if not paths:
+        return results
+
     try:
-        # -d (date format) must come before the tags it applies to
+        # -d (date format) must come before the tags it applies to.
+        # File paths go on stdin as an arg file (-@ -) so argv size never hits
+        # platform limits (ARG_MAX on POSIX, ~32K chars on Windows). Paths are
+        # absolute, so none can start with "-" and be parsed as an option.
         result = subprocess.run(
             [
                 "exiftool", "-T", fast_flag,
                 "-d", "%Y_%m_%d_%H%M%S",
                 "-filename", "-DateTimeOriginal", "-CreateDate",
-            ] + [str(f) for f in batch],
+                "-@", "-",
+            ],
+            input="\n".join(paths),
             capture_output=True,
             text=True,
             timeout=EXIFTOOL_TIMEOUT,
         )
     except subprocess.TimeoutExpired:
-        log.error(f"exiftool timed out after {EXIFTOOL_TIMEOUT} seconds")
-        return {}
-
-    if result.returncode != 0:
-        log.warning(
-            f"exiftool returned non-zero exit code {result.returncode} "
-            f"(batch of {len(batch)} files)"
-        )
+        raise ExifToolError(
+            f"exiftool timed out after {EXIFTOOL_TIMEOUT} seconds "
+            f"(batch of {len(paths)} files)"
+        ) from None
 
     # Log any stderr output (warnings, errors from exiftool)
     if result.stderr.strip():
         for line in result.stderr.strip().split("\n"):
             log.debug(f"exiftool: {line}")
 
+    has_output = bool(result.stdout.strip())
+
+    # Negative code = killed by a signal (a Ctrl+C reaches the child too);
+    # non-zero with no output at all = total failure. Either way the dates are
+    # unknown, not absent, so the caller must not fall back to mtime.
+    if result.returncode < 0 or (result.returncode != 0 and not has_output):
+        raise ExifToolError(
+            f"exiftool failed with exit code {result.returncode} "
+            f"(batch of {len(paths)} files)"
+        )
+    if result.returncode != 0:
+        log.warning(
+            f"exiftool returned non-zero exit code {result.returncode} "
+            f"(batch of {len(paths)} files) — some files may be unreadable"
+        )
+
     # Parse tab-separated output: filename \t DateTimeOriginal \t CreateDate
-    if not result.stdout.strip():
+    if not has_output:
         return results
 
     for line in result.stdout.strip().split("\n"):
@@ -311,11 +354,13 @@ def get_exif_dates(files: list[Path]) -> dict[str, str]:
 
     Files are grouped by the -fast level their container allows (see
     QUICKTIME_EXTENSIONS), then split into batches of EXIFTOOL_BATCH_SIZE
-    to stay within OS argument length limits (ARG_MAX). Multiple batches
-    run in parallel (exiftool is single-threaded, so concurrent processes
-    overlap CPU and I/O).
+    to bound the work of one exiftool process. Multiple batches run in
+    parallel (exiftool is single-threaded, so concurrent processes overlap
+    CPU and I/O).
 
     Returns a dict mapping filename -> formatted date string.
+
+    Raises ExifToolError if any batch fails (see _run_exiftool_batch).
     """
     if not files:
         return {}
@@ -354,27 +399,43 @@ def find_files(input_folder: Path) -> list[ScannedFile]:
     Uses os.scandir() for efficiency (cached stat results). The mtime is
     captured here — from the same cached stat — so later stages never need
     to touch the filesystem for the fallback date.
+
+    Symbolic links are skipped: moving the link itself would break a relative
+    target, and following it would move a file living outside the folder.
+
+    Raises ScanError if the folder cannot be read.
     """
     files: list[ScannedFile] = []
+    skipped_links = 0
 
     try:
         with os.scandir(input_folder) as entries:
             for entry in entries:
-                # entry.is_file() uses cached stat from scandir
                 _, ext = os.path.splitext(entry.name)
-                if entry.is_file() and ext.lower() in ALL_EXTENSIONS:
-                    try:
-                        mtime = entry.stat().st_mtime
-                        mtime_date = dt.fromtimestamp(mtime).strftime("%Y_%m_%d_%H%M%S")
-                    except OSError:
-                        mtime_date = None
-                    files.append(ScannedFile(Path(entry.path), mtime_date))
+                if ext.lower() not in ALL_EXTENSIONS:
+                    continue
+                if entry.is_symlink():
+                    log.debug(f"Skipping symbolic link: {entry.name}")
+                    skipped_links += 1
+                    continue
+                # entry.is_file() uses cached stat from scandir
+                if not entry.is_file():
+                    continue
+                try:
+                    mtime = entry.stat().st_mtime
+                    mtime_date = dt.fromtimestamp(mtime).strftime("%Y_%m_%d_%H%M%S")
+                except OSError:
+                    mtime_date = None
+                files.append(ScannedFile(Path(entry.path), mtime_date))
     except PermissionError as e:
         log.error(f"Permission denied: {e}")
-        return []
+        raise ScanError(str(e)) from e
     except OSError as e:
         log.error(f"Error reading directory: {e}")
-        return []
+        raise ScanError(str(e)) from e
+
+    if skipped_links:
+        log.warning(f"Skipped {skipped_links} symbolic links")
 
     # Sort for deterministic order (casefold for better Unicode handling)
     files.sort(key=lambda f: f.path.name.casefold())
@@ -400,8 +461,9 @@ class UniqueFilenameGenerator:
             try:
                 with os.scandir(folder) as entries:
                     for entry in entries:
-                        if entry.is_file():
-                            existing.add(entry.name)
+                        # Every entry counts: a directory named like the
+                        # target is a collision too.
+                        existing.add(entry.name)
             except OSError:
                 # Folder may not exist yet (e.g., dry-run) or permission denied
                 pass
@@ -484,6 +546,56 @@ class MoveResult(NamedTuple):
     is_duplicate: bool = False
 
 
+def _copy_exclusive(source: Path, dest: Path) -> None:
+    """Copy source to dest, creating dest exclusively (never overwrites)."""
+    fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+    try:
+        with os.fdopen(fd, "wb") as dst, open(source, "rb") as src:
+            shutil.copyfileobj(src, dst)
+        shutil.copystat(source, dest)
+    except BaseException:
+        try:
+            os.unlink(dest)
+        except OSError:
+            pass
+        raise
+
+
+def _move_no_clobber(source: Path, dest: Path) -> None:
+    """
+    Move source to dest without ever replacing an existing dest.
+
+    os.rename() silently overwrites on POSIX, so the name is claimed
+    atomically first: os.link() fails with FileExistsError if dest exists.
+    Filesystems without hard links (FAT/exFAT SD cards) get an O_EXCL
+    placeholder that our own rename then replaces; cross-device moves use an
+    exclusive-create copy.
+    """
+    try:
+        os.link(source, dest)
+    except FileExistsError:
+        raise
+    except OSError as e:
+        if e.errno == errno.EXDEV:
+            _copy_exclusive(source, dest)
+            os.unlink(source)
+            return
+        # No hard-link support: claim the name, then replace our placeholder.
+        # os.replace (not os.rename) so this also works on Windows.
+        fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+        os.close(fd)
+        try:
+            os.replace(source, dest)
+        except OSError:
+            try:
+                os.unlink(dest)
+            except OSError:
+                pass
+            raise
+        return
+    os.unlink(source)
+
+
 def move_single_file(
     source: Path,
     dest_path: Path,
@@ -492,22 +604,26 @@ def move_single_file(
     """
     Move a single file from source to dest_path.
 
-    Tries os.rename first (instant on same filesystem), falls back to
-    shutil.move for cross-device moves. Designed to be called from a
-    thread pool — each invocation is independent with no shared mutable state.
+    Never overwrites an existing destination (see _move_no_clobber); a
+    collision that appears after the name scan is reported as an error.
+    Designed to be called from a thread pool — each invocation is
+    independent with no shared mutable state.
     """
     try:
-        try:
-            os.rename(source, dest_path)
-        except OSError:
-            # Cross-device move — fall back to copy + delete
-            shutil.move(source, dest_path)
+        _move_no_clobber(source, dest_path)
 
         return MoveResult(
             success=True,
             source_name=source.name,
             dest_path=dest_path,
             is_duplicate=is_duplicate,
+        )
+
+    except FileExistsError:
+        return MoveResult(
+            success=False,
+            source_name=source.name,
+            error=f"destination already exists: {dest_path}",
         )
 
     except (OSError, shutil.Error) as e:
@@ -642,10 +758,23 @@ def process_files(
     if dry_run:
         log.warning("DRY RUN MODE — no changes will be made")
 
-    # Get all EXIF dates via exiftool (batched if >5000 files)
+    # Get all EXIF dates via exiftool (batched; parallel for large folders)
     log.info("Reading EXIF data...")
-    file_dates = get_exif_dates([f.path for f in files])
+    try:
+        file_dates = get_exif_dates([f.path for f in files])
+    except ExifToolError as e:
+        if interrupt_handler.interrupted:
+            log.warning("Interrupt received — nothing was moved")
+            return 0, 0
+        log.error(f"EXIF read failed — nothing was moved: {e}")
+        return 0, 1
     log.info(f"Got EXIF dates for {len(file_dates)}/{len(files)} files")
+
+    # A Ctrl+C during the EXIF scan must stop us here, before anything touches
+    # the disk; the flag is otherwise only observed inside the move loop.
+    if interrupt_handler.interrupted:
+        log.warning("Interrupt received — nothing was moved")
+        return 0, 0
 
     # Prepare file info and collect unique date folders
     log.info("Preparing file operations...")
@@ -841,14 +970,17 @@ Supported formats:
         output_folder.mkdir(parents=True, exist_ok=True)
 
     with InterruptHandler() as interrupt_handler:
-        success, errors = process_files(
-            input_folder,
-            output_folder,
-            args.raw_subfolder,
-            args.dry_run,
-            interrupt_handler,
-            workers=args.workers,
-        )
+        try:
+            success, errors = process_files(
+                input_folder,
+                output_folder,
+                args.raw_subfolder,
+                args.dry_run,
+                interrupt_handler,
+                workers=args.workers,
+            )
+        except ScanError:
+            return 1  # already logged by find_files()
 
         if interrupt_handler.interrupted:
             return 130  # Standard Ctrl+C exit code
