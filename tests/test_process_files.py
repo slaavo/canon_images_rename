@@ -427,3 +427,61 @@ class TestUnreadableFile:
 
         assert (success, errors) == (1, 1)
         assert list(output_dir.iterdir()) == []
+
+
+class TestLazyMtime:
+    """mtime is fetched only for files exiftool inspected and found no date for."""
+
+    def test_mtime_fetched_only_for_files_without_exif(self, tmp_path: Path):
+        input_dir = tmp_path / "input"
+        output_dir = tmp_path / "output"
+        input_dir.mkdir()
+        output_dir.mkdir()
+        for n in ("a.jpg", "b.jpg", "c.jpg"):
+            (input_dir / n).write_text(n)
+
+        mock_result = MagicMock()
+        mock_result.returncode = 1
+        # a: dated; b: inspected, no date; c: no row (unreadable)
+        mock_result.stdout = "a.jpg\t2024_01_15_143052\t-\nb.jpg\t-\t-\n"
+        mock_result.stderr = "Error: File not found - c.jpg\n"
+
+        import rename_and_move_files as m
+        real_get_mtime_dates = m.get_mtime_dates
+
+        with patch("rename_and_move_files.subprocess.run", return_value=mock_result):
+            with patch(
+                "rename_and_move_files.get_mtime_dates",
+                side_effect=real_get_mtime_dates,
+            ) as mock_mtime:
+                success, errors = process_files(
+                    input_dir, output_dir,
+                    move_raw_to_orig=False, dry_run=True,
+                    interrupt_handler=InterruptHandler(), workers=1,
+                )
+
+        mock_mtime.assert_called_once()
+        assert [p.name for p in mock_mtime.call_args[0][0]] == ["b.jpg"]
+        assert (success, errors) == (2, 1)
+
+    def test_no_stat_when_every_file_has_exif(self, tmp_path: Path):
+        input_dir = tmp_path / "input"
+        output_dir = tmp_path / "output"
+        input_dir.mkdir()
+        output_dir.mkdir()
+        (input_dir / "a.jpg").write_text("a")
+
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = "a.jpg\t2024_01_15_143052\t-\n"
+        mock_result.stderr = ""
+
+        with patch("rename_and_move_files.subprocess.run", return_value=mock_result):
+            with patch("rename_and_move_files.get_mtime_dates") as mock_mtime:
+                process_files(
+                    input_dir, output_dir,
+                    move_raw_to_orig=False, dry_run=True,
+                    interrupt_handler=InterruptHandler(), workers=1,
+                )
+
+        mock_mtime.assert_not_called()

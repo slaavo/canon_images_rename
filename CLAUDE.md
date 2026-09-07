@@ -39,9 +39,10 @@ SessionStart hook) installs both automatically. The test suite mocks
 function:
 
 1. `find_files()` — `os.scandir()` for supported extensions (no recursion,
-   symlinks skipped), sorted case-insensitively. Returns `ScannedFile` tuples
-   carrying the formatted mtime (from scandir's cached stat) for the fallback
-   date. Raises `ScanError` (→ exit 1) if the folder cannot be read.
+   symlinks skipped), sorted case-insensitively. Returns plain `Path`s and
+   does **no** per-file `stat`: on POSIX `is_file()`/`is_symlink()` come from
+   `d_type`, whereas `DirEntry.stat()` is a real syscall. Raises `ScanError`
+   (→ exit 1) if the folder cannot be read.
 2. `get_exif_dates()` — groups files by the exiftool `-fast` level their
    container allows (`-fast2` for JPEG/TIFF-based RAW, `-fast` for the
    QuickTime-backed formats in `QUICKTIME_EXTENSIONS`, i.e. CR3), then runs one
@@ -58,14 +59,19 @@ function:
    exiftool could **not** open prints no output row and stays **absent** →
    `plan_moves()` reports it as unreadable (an error; the file is left in
    place, never dated by mtime).
-3. `plan_moves()` — **pure** routing function (no I/O; the mtime fallback uses
-   `ScannedFile.mtime_date`). Decides each file's destination folder and new
-   name. Keep it pure so routing stays unit-testable without mocks.
-4. `ensure_folders_exist()` — pre-creates all date folders and their subfolders.
-5. `UniqueFilenameGenerator` — resolves name collisions (`_2`, `_3`, …) against
+3. `get_mtime_dates()` — the only per-file `stat`, called by
+   `process_files()` with exactly the files exiftool inspected and found no
+   date for (an explicit `None` in `file_dates`); files with EXIF and
+   unreadable files are never stat'ed.
+4. `plan_moves()` — **pure** routing function (no I/O; the mtime fallback
+   reads the pre-fetched `mtime_dates`). Decides each file's destination
+   folder and new name. Keep it pure so routing stays unit-testable without
+   mocks.
+5. `ensure_folders_exist()` — pre-creates all date folders and their subfolders.
+6. `UniqueFilenameGenerator` — resolves name collisions (`_2`, `_3`, …) against
    both on-disk files and names already allocated this run. Runs sequentially
    before the parallel moves.
-6. `move_single_file()` via `ThreadPoolExecutor` — `_move_no_clobber()`:
+7. `move_single_file()` via `ThreadPoolExecutor` — `_move_no_clobber()`:
    `os.link` + `os.unlink` (atomic, fails if the destination exists), an
    `O_EXCL` placeholder + `os.replace` on filesystems without hard links
    (FAT/exFAT), and an exclusive-create copy for cross-device moves. A
@@ -99,6 +105,10 @@ is created) and the move loop checks it to cancel not-yet-started tasks. Output 
   degrade into mtime-based filing. `ExifToolError` must abort the run. The same
   holds per file: "absent from `file_dates`" means *not inspected* — only an
   explicit `None` entry may fall back to mtime.
+- **Never `stat` every file in the scan.** The mtime is needed only for the
+  (usually few) files without an EXIF date; on a NAS each `stat` is a network
+  round-trip. Keep `find_files()` stat-free and fetch mtimes lazily through
+  `get_mtime_dates()`.
 - **Never read CR3 with exiftool `-fast2` (or higher).** CR3 is a QuickTime
   container and `-fast2` stops parsing at the `mdat` atom, so a file whose
   `moov` sits after the media data loses its date and gets silently filed by

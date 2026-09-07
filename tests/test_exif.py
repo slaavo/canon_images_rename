@@ -12,6 +12,7 @@ from rename_and_move_files import (
     _run_exiftool_batch,
     get_exif_dates,
     check_exiftool,
+    get_mtime_dates,
     ExifToolError,
     EXIFTOOL_BATCH_SIZE,
 )
@@ -363,6 +364,32 @@ class TestRunExiftoolBatch:
 
         assert results == {}
         mock_run.assert_not_called()
+
+
+class TestGetMtimeDates:
+    """Tests for get_mtime_dates (the lazy mtime fallback)."""
+
+    def test_returns_formatted_date(self, tmp_path: Path):
+        """Return modification date as YYYY_MM_DD_HHMMSS keyed by filename."""
+        test_file = tmp_path / "test.jpg"
+        test_file.touch()
+
+        result = get_mtime_dates([test_file])
+
+        assert list(result) == ["test.jpg"]
+        value = result["test.jpg"]
+        assert value is not None
+        assert len(value) == 17
+        assert value[4] == "_" and value[7] == "_" and value[10] == "_"
+
+    def test_nonexistent_file_maps_to_none(self, tmp_path: Path):
+        """A file that cannot be stat'ed maps to None (it will be skipped)."""
+        result = get_mtime_dates([tmp_path / "does_not_exist.jpg"])
+
+        assert result == {"does_not_exist.jpg": None}
+
+    def test_empty_list(self):
+        assert get_mtime_dates([]) == {}
 
 
 class TestCheckExiftool:

@@ -131,17 +131,6 @@ class ExifToolError(RuntimeError):
     """exiftool did not complete: timeout, killed by a signal, or no output with a non-zero exit."""
 
 
-class ScannedFile(NamedTuple):
-    """A file found during the directory scan.
-
-    mtime_date is the modification time already formatted as
-    YYYY_MM_DD_HHMMSS (captured from scandir's cached stat), or None if
-    stat failed. It serves as the fallback when EXIF has no date.
-    """
-    path: Path
-    mtime_date: str | None
-
-
 class FileInfo(NamedTuple):
     """Metadata for a single file to be processed."""
     path: Path
@@ -397,20 +386,40 @@ def get_exif_dates(files: list[Path]) -> dict[str, str | None]:
     return file_dates
 
 
-def find_files(input_folder: Path) -> list[ScannedFile]:
+def get_mtime_dates(files: list[Path]) -> dict[str, str | None]:
+    """
+    Fetch modification dates for the given files (the EXIF-less ones).
+
+    This is the only per-file stat in the pipeline, so it is called with
+    exactly the files that need the fallback — on a NAS every stat is a
+    network round-trip. Returns filename -> YYYY_MM_DD_HHMMSS, or None if
+    the file could not be stat'ed.
+    """
+    mtime_dates: dict[str, str | None] = {}
+    for file in files:
+        try:
+            mtime = file.stat().st_mtime
+            mtime_dates[file.name] = dt.fromtimestamp(mtime).strftime("%Y_%m_%d_%H%M%S")
+        except OSError:
+            mtime_dates[file.name] = None
+    return mtime_dates
+
+
+def find_files(input_folder: Path) -> list[Path]:
     """
     Find all supported image files in the given folder.
 
-    Uses os.scandir() for efficiency (cached stat results). The mtime is
-    captured here — from the same cached stat — so later stages never need
-    to touch the filesystem for the fallback date.
+    Uses os.scandir(); is_file()/is_symlink() come from the directory
+    entry type (d_type) on POSIX, so the scan does no per-file stat.
+    Modification times are fetched later, and only for files that need the
+    fallback (see get_mtime_dates).
 
     Symbolic links are skipped: moving the link itself would break a relative
     target, and following it would move a file living outside the folder.
 
     Raises ScanError if the folder cannot be read.
     """
-    files: list[ScannedFile] = []
+    files: list[Path] = []
     skipped_links = 0
 
     try:
@@ -423,15 +432,9 @@ def find_files(input_folder: Path) -> list[ScannedFile]:
                     log.debug(f"Skipping symbolic link: {entry.name}")
                     skipped_links += 1
                     continue
-                # entry.is_file() uses cached stat from scandir
                 if not entry.is_file():
                     continue
-                try:
-                    mtime = entry.stat().st_mtime
-                    mtime_date = dt.fromtimestamp(mtime).strftime("%Y_%m_%d_%H%M%S")
-                except OSError:
-                    mtime_date = None
-                files.append(ScannedFile(Path(entry.path), mtime_date))
+                files.append(Path(entry.path))
     except PermissionError as e:
         log.error(f"Permission denied: {e}")
         raise ScanError(str(e)) from e
@@ -443,7 +446,7 @@ def find_files(input_folder: Path) -> list[ScannedFile]:
         log.warning(f"Skipped {skipped_links} symbolic links")
 
     # Sort for deterministic order (casefold for better Unicode handling)
-    files.sort(key=lambda f: f.path.name.casefold())
+    files.sort(key=lambda f: f.name.casefold())
     return files
 
 
@@ -688,8 +691,9 @@ def validate_paths(input_folder: Path, output_folder: Path) -> bool:
 
 
 def plan_moves(
-    files: list[ScannedFile],
+    files: list[Path],
     file_dates: dict[str, str | None],
+    mtime_dates: dict[str, str | None],
     output_folder: Path,
     move_raw_to_orig: bool,
 ) -> tuple[list[FileInfo], set[str], int, int, int]:
@@ -699,8 +703,8 @@ def plan_moves(
     Pure function — no I/O. file_dates follows get_exif_dates(): a file
     absent from it was never inspected by exiftool (unreadable) and is
     reported as an error, never dated by mtime; a None value means exiftool
-    inspected the file and found no date tag, so the mtime captured during
-    the directory scan (ScannedFile.mtime_date) is used.
+    inspected the file and found no date tag, so the pre-fetched
+    modification date from mtime_dates (see get_mtime_dates) is used.
 
     Returns:
         (file_infos, date_folders, fallback_count, skipped_count, unreadable_count)
@@ -711,7 +715,7 @@ def plan_moves(
     fallback_count = 0
     unreadable_count = 0
 
-    for file, mtime_date in files:
+    for file in files:
         if file.name not in file_dates:
             log.error(f"Could not read metadata: {file.name} (skipping)")
             unreadable_count += 1
@@ -721,7 +725,7 @@ def plan_moves(
         used_fallback = False
 
         if not datetime_str:
-            datetime_str = mtime_date
+            datetime_str = mtime_dates.get(file.name)
             if datetime_str:
                 used_fallback = True
                 fallback_count += 1
@@ -791,7 +795,7 @@ def process_files(
     # Get all EXIF dates via exiftool (batched; parallel for large folders)
     log.info("Reading EXIF data...")
     try:
-        file_dates = get_exif_dates([f.path for f in files])
+        file_dates = get_exif_dates(files)
     except ExifToolError as e:
         if interrupt_handler.interrupted:
             log.warning("Interrupt received — nothing was moved")
@@ -807,10 +811,15 @@ def process_files(
         log.warning("Interrupt received — nothing was moved")
         return 0, 0
 
+    # Modification times only for files exiftool inspected but found no
+    # date in — never for every file (a stat per file is a round-trip on a NAS).
+    needs_mtime = [f for f in files if f.name in file_dates and file_dates[f.name] is None]
+    mtime_dates = get_mtime_dates(needs_mtime) if needs_mtime else {}
+
     # Prepare file info and collect unique date folders
     log.info("Preparing file operations...")
     file_infos, date_folders, fallback_count, skipped_count, unreadable_count = plan_moves(
-        files, file_dates, output_folder, move_raw_to_orig,
+        files, file_dates, mtime_dates, output_folder, move_raw_to_orig,
     )
 
     if fallback_count > 0:

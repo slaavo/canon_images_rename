@@ -4,12 +4,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from rename_and_move_files import ScannedFile, plan_moves
+from rename_and_move_files import plan_moves
 
 
-def sf(path: str, mtime_date: str | None = None) -> ScannedFile:
-    """Shorthand to build a ScannedFile for tests."""
-    return ScannedFile(Path(path), mtime_date)
+def sf(path: str) -> Path:
+    """Shorthand for a scanned file path."""
+    return Path(path)
 
 
 class TestPlanMoves:
@@ -21,7 +21,7 @@ class TestPlanMoves:
         dates = {"IMG.jpg": "2024_01_15_143052"}
 
         infos, folders, fallback, skipped, _ = plan_moves(
-            files, dates, Path("/out"), move_raw_to_orig=False,
+            files, dates, {}, Path("/out"), move_raw_to_orig=False,
         )
 
         assert len(infos) == 1
@@ -34,7 +34,7 @@ class TestPlanMoves:
         dates = {"IMG.JPG": "2024_01_15_143052"}
 
         infos, folders, _, _, _ = plan_moves(
-            files, dates, Path("/out"), move_raw_to_orig=False,
+            files, dates, {}, Path("/out"), move_raw_to_orig=False,
         )
 
         assert infos[0].dest_folder == Path("/out/2024_01_15/!orig")
@@ -45,7 +45,7 @@ class TestPlanMoves:
         dates = {"IMG.cr3": "2024_01_15_143052"}
 
         infos, folders, _, _, _ = plan_moves(
-            files, dates, Path("/out"), move_raw_to_orig=False,
+            files, dates, {}, Path("/out"), move_raw_to_orig=False,
         )
 
         assert infos[0].dest_folder == Path("/out/2024_01_15")
@@ -56,7 +56,7 @@ class TestPlanMoves:
         dates = {"IMG.CR3": "2024_01_15_143052"}
 
         infos, folders, _, _, _ = plan_moves(
-            files, dates, Path("/out"), move_raw_to_orig=True,
+            files, dates, {}, Path("/out"), move_raw_to_orig=True,
         )
 
         assert infos[0].dest_folder == Path("/out/2024_01_15/!orig")
@@ -75,17 +75,18 @@ class TestPlanMoves:
         }
 
         _, folders, _, _, _ = plan_moves(
-            files, dates, Path("/out"), move_raw_to_orig=False,
+            files, dates, {}, Path("/out"), move_raw_to_orig=False,
         )
 
         assert folders == {"2024_01_15", "2024_01_16"}
 
     def test_fallback_to_mtime(self):
         """Files without EXIF should fall back to the scanned mtime date."""
-        files = [sf("/photos/IMG.jpg", mtime_date="2024_02_01_120000")]
+        files = [sf("/photos/IMG.jpg")]
 
         infos, _, fallback_count, skipped, _ = plan_moves(
-            files, {"IMG.jpg": None}, Path("/out"), move_raw_to_orig=False,
+            files, {"IMG.jpg": None}, {"IMG.jpg": "2024_02_01_120000"},
+            Path("/out"), move_raw_to_orig=False,
         )
 
         assert len(infos) == 1
@@ -96,10 +97,11 @@ class TestPlanMoves:
 
     def test_skips_file_without_any_date(self):
         """Files with no EXIF and no mtime should be skipped."""
-        files = [sf("/fake/IMG.jpg", mtime_date=None)]
+        files = [sf("/fake/IMG.jpg")]
 
         infos, _, fallback, skipped, _ = plan_moves(
-            files, {"IMG.jpg": None}, Path("/out"), move_raw_to_orig=False,
+            files, {"IMG.jpg": None}, {"IMG.jpg": None},
+            Path("/out"), move_raw_to_orig=False,
         )
 
         assert len(infos) == 0
@@ -107,10 +109,11 @@ class TestPlanMoves:
 
     def test_no_io_for_nonexistent_paths(self):
         """plan_moves is pure: nonexistent paths still route (no filesystem access)."""
-        files = [sf("/definitely/does/not/exist/IMG.jpg", mtime_date="2024_05_05_050505")]
+        files = [sf("/definitely/does/not/exist/IMG.jpg")]
 
         infos, folders, fallback, skipped, _ = plan_moves(
-            files, {"IMG.jpg": None}, Path("/out"), move_raw_to_orig=False,
+            files, {"IMG.jpg": None}, {"IMG.jpg": "2024_05_05_050505"},
+            Path("/out"), move_raw_to_orig=False,
         )
 
         assert len(infos) == 1
@@ -120,10 +123,12 @@ class TestPlanMoves:
 
     def test_uninspected_file_is_error_not_mtime(self):
         """A file absent from file_dates was never read by exiftool: no mtime fallback."""
-        files = [sf("/photos/IMG.jpg", mtime_date="2024_02_01_120000")]
+        files = [sf("/photos/IMG.jpg")]
 
+        # Even with an mtime available, an uninspected file must not use it.
         infos, folders, fallback, skipped, unreadable = plan_moves(
-            files, {}, Path("/out"), move_raw_to_orig=False,
+            files, {}, {"IMG.jpg": "2024_02_01_120000"},
+            Path("/out"), move_raw_to_orig=False,
         )
 
         assert infos == []
@@ -135,7 +140,7 @@ class TestPlanMoves:
     def test_empty_file_list(self):
         """Empty file list should return empty results."""
         infos, folders, fallback, skipped, _ = plan_moves(
-            [], {}, Path("/out"), move_raw_to_orig=False,
+            [], {}, {}, Path("/out"), move_raw_to_orig=False,
         )
 
         assert infos == []
@@ -149,7 +154,7 @@ class TestPlanMoves:
         dates = {"DSC_1234.NEF": "2024_03_20_091500"}
 
         infos, _, _, _, _ = plan_moves(
-            files, dates, Path("/out"), move_raw_to_orig=False,
+            files, dates, {}, Path("/out"), move_raw_to_orig=False,
         )
 
         assert infos[0].new_filename == "2024_03_20_091500_DSC_1234.NEF"
@@ -160,7 +165,7 @@ class TestPlanMoves:
         dates = {"IMG.CR3": "2024_01_15_143052"}
 
         infos, _, _, _, _ = plan_moves(
-            files, dates, Path("/out"), move_raw_to_orig=False,
+            files, dates, {}, Path("/out"), move_raw_to_orig=False,
         )
 
         assert infos[0].new_filename.endswith(".CR3")
@@ -179,7 +184,7 @@ class TestPlanMoves:
         }
 
         infos, _, _, _, _ = plan_moves(
-            files, dates, Path("/out"), move_raw_to_orig=False,
+            files, dates, {}, Path("/out"), move_raw_to_orig=False,
         )
 
         # JPEG -> !orig

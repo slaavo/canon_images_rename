@@ -27,7 +27,7 @@ class TestFindFiles:
         """Find files with all supported extensions."""
         files = find_files(sample_photos)
 
-        filenames = {f.path.name for f in files}
+        filenames = {f.name for f in files}
         # JPEG
         assert "IMG_001.jpg" in filenames
         assert "IMG_002.JPG" in filenames
@@ -46,7 +46,7 @@ class TestFindFiles:
         """Ignore files with unsupported extensions."""
         files = find_files(sample_photos)
 
-        filenames = {f.path.name for f in files}
+        filenames = {f.name for f in files}
         assert "document.pdf" not in filenames
         assert "notes.txt" not in filenames
 
@@ -77,7 +77,7 @@ class TestFindFiles:
         """Results should be sorted by filename (case-insensitive)."""
         files = find_files(sample_photos)
 
-        names = [f.path.name.casefold() for f in files]
+        names = [f.name.casefold() for f in files]
         assert names == sorted(names)
 
     def test_ignores_subdirectories(self, sample_photos: Path):
@@ -88,7 +88,7 @@ class TestFindFiles:
 
         files = find_files(sample_photos)
 
-        filenames = {f.path.name for f in files}
+        filenames = {f.name for f in files}
         assert "hidden.jpg" not in filenames
 
     def test_unreadable_directory_raises_scan_error_and_logs(self, tmp_path: Path):
@@ -112,7 +112,7 @@ class TestFindFiles:
         with patch("rename_and_move_files.log.warning") as mock_warn:
             files = find_files(photos)
 
-        assert [f.path.name for f in files] == ["real.jpg"]
+        assert [f.name for f in files] == ["real.jpg"]
         mock_warn.assert_called_once()
         assert "1 symbolic link" in mock_warn.call_args[0][0]
 
@@ -132,22 +132,15 @@ class TestFindFiles:
         files = find_files(photos)
         assert len(files) == 6
 
-    def test_captures_mtime_date(self, tmp_path: Path):
-        """Each ScannedFile should carry the mtime formatted as YYYY_MM_DD_HHMMSS."""
+    def test_returns_paths(self, tmp_path: Path):
+        """find_files returns plain Paths; no per-file metadata is gathered."""
         photos = tmp_path / "photos"
         photos.mkdir()
-        test_file = photos / "a.jpg"
-        test_file.touch()
+        (photos / "a.jpg").touch()
 
         files = find_files(photos)
 
-        assert len(files) == 1
-        mtime_date = files[0].mtime_date
-        assert mtime_date is not None
-        assert len(mtime_date) == 17
-        assert mtime_date[4] == "_"
-        assert mtime_date[7] == "_"
-        assert mtime_date[10] == "_"
+        assert files == [photos / "a.jpg"]
 
 
 class TestMoveSingleFile:

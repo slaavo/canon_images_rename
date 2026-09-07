@@ -179,3 +179,28 @@ Nowe testy: wiersz `-` → `None`, brak wiersza → brak wpisu, `plan_moves` z `
 `unreadable == 1` bez fallbacku, `process_files` z jednym nieczytelnym plikiem →
 `(1, 1)` i plik na miejscu (także dry-run), rollback linku i kopii EXDEV przy
 nieudanym `unlink` źródła.
+
+
+---
+
+## Runda 8 — czwarte review Codexa (commit `166253c`), 1 uwaga P2
+
+**Uwaga:** „Defer mtime stat calls until fallback is needed" — `find_files()`
+wołało `entry.stat()` dla każdego zdjęcia. **Trafna, i koryguje błędne
+uzasadnienie z rundy 4:** założenie, że `DirEntry.stat()` korzysta z
+cache'a scandir, jest prawdziwe tylko na Windows. Na Uniksie
+`is_file()`/`is_symlink()` biorą typ z `d_type` bez syscalla, a
+`DirEntry.stat()` to zawsze osobny `stat`. Oryginalny kod stat-ował tylko
+pliki bez daty EXIF; zmiana z rundy 4 dodała `stat` na każdy plik — na
+folderze z aparatu regresja, na NAS wyraźna (każdy `stat` = round-trip).
+
+| Zmiana | Szczegóły |
+|--------|-----------|
+| Usunięty `ScannedFile`; `find_files()` znów zwraca `Path`-y | Skan bez żadnego `stat` per plik. |
+| Nowa `get_mtime_dates()` | Jedyny `stat` w pipeline; wołana z dokładnie tymi plikami, dla których exiftool zwrócił `None` (zbadany, bez daty). Pliki z EXIF i pliki niezbadane nie są stat-owane. |
+| `plan_moves(files, file_dates, mtime_dates, …)` | Nadal czysta; fallback czyta gotowy słownik. |
+
+Testy: `TestGetMtimeDates`, `test_mtime_fetched_only_for_files_without_exif`
+(a: data, b: `-`, c: brak wiersza → `get_mtime_dates([b])`),
+`test_no_stat_when_every_file_has_exif`. Weryfikacja liczbą syscalli `stat`
+(strace) na folderze z ~200 zdjęciami z EXIF — patrz commit.
