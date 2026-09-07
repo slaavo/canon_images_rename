@@ -62,9 +62,9 @@ class TestGetExifDates:
             "IMG_001.jpg": "2024_01_15_143052",
             "IMG_002.JPG": "2024_01_15_143105",
             "IMG_003.cr3": "2024_01_16_091500",
-            # IMG_004.CR3 has no date, should be missing
+            # IMG_004.CR3 was inspected but has no date: present, None
+            "IMG_004.CR3": None,
         }
-        assert "IMG_004.CR3" not in dates
 
     def test_prefers_datetime_original_over_create_date(self):
         """DateTimeOriginal should be preferred over CreateDate."""
@@ -211,6 +211,33 @@ class TestRunExiftoolBatch:
         assert argv[0] == "exiftool"
         assert "-fast" in argv
         assert "-fast2" not in argv
+
+    def test_inspected_file_without_date_is_present_as_none(self):
+        """A '-' row means exiftool opened the file and found no date: keep the key."""
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = "noexif.jpg\t-\t-\n"
+        mock_result.stderr = ""
+
+        with patch("rename_and_move_files.subprocess.run", return_value=mock_result):
+            results = _run_exiftool_batch([Path("/fake/noexif.jpg")], "-fast2")
+
+        assert results == {"noexif.jpg": None}
+
+    def test_uninspected_file_is_absent(self):
+        """A file with no output row (exiftool could not open it) stays absent."""
+        mock_result = MagicMock()
+        mock_result.returncode = 1  # exiftool: one file had an error
+        mock_result.stdout = "good.jpg\t2024_01_15_143052\t-\n"
+        mock_result.stderr = "Error: File not found - /fake/gone.jpg\n"
+
+        with patch("rename_and_move_files.subprocess.run", return_value=mock_result):
+            results = _run_exiftool_batch(
+                [Path("/fake/good.jpg"), Path("/fake/gone.jpg")], "-fast2",
+            )
+
+        assert results == {"good.jpg": "2024_01_15_143052"}
+        assert "gone.jpg" not in results
 
     def test_parses_absolute_path_in_output(self):
         """exiftool may return absolute paths; only filename should be used."""

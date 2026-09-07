@@ -52,7 +52,12 @@ function:
    output and prefers DateTimeOriginal over CreateDate. A timeout, a
    signal-killed exiftool, or a non-zero exit with no output raises
    `ExifToolError`; `process_files()` then aborts **before moving anything**
-   (dates are unknown, not absent — no mtime fallback).
+   (dates are unknown, not absent — no mtime fallback). Per file, the result
+   dict carries a status: a file exiftool could open has an entry (its date,
+   or `None` when it has no date tag → legitimate mtime fallback); a file
+   exiftool could **not** open prints no output row and stays **absent** →
+   `plan_moves()` reports it as unreadable (an error; the file is left in
+   place, never dated by mtime).
 3. `plan_moves()` — **pure** routing function (no I/O; the mtime fallback uses
    `ScannedFile.mtime_date`). Decides each file's destination folder and new
    name. Keep it pure so routing stays unit-testable without mocks.
@@ -65,7 +70,8 @@ function:
    `O_EXCL` placeholder + `os.replace` on filesystems without hard links
    (FAT/exFAT), and an exclusive-create copy for cross-device moves. A
    destination is **never** overwritten; a late collision is reported as an
-   error. Stateless and thread-safe.
+   error, and a failed move never leaves a destination behind (the link/copy
+   is rolled back if the source cannot be removed). Stateless and thread-safe.
 
 `InterruptHandler` (context manager) installs a SIGINT handler that only sets a
 flag; `process_files()` checks it right after the EXIF scan (before any folder
@@ -90,7 +96,9 @@ is created) and the move loop checks it to cancel not-yet-started tasks. Output 
   checks in `UniqueFilenameGenerator` count every directory entry, not just
   files, for the same reason.
 - An exiftool failure is not "no EXIF": never let a timeout or killed exiftool
-  degrade into mtime-based filing. `ExifToolError` must abort the run.
+  degrade into mtime-based filing. `ExifToolError` must abort the run. The same
+  holds per file: "absent from `file_dates`" means *not inspected* — only an
+  explicit `None` entry may fall back to mtime.
 - **Never read CR3 with exiftool `-fast2` (or higher).** CR3 is a QuickTime
   container and `-fast2` stops parsing at the `mdat` atom, so a file whose
   `moov` sits after the media data loses its date and gets silently filed by

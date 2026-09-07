@@ -20,7 +20,7 @@ class TestPlanMoves:
         files = [sf("/photos/IMG.jpg")]
         dates = {"IMG.jpg": "2024_01_15_143052"}
 
-        infos, folders, fallback, skipped = plan_moves(
+        infos, folders, fallback, skipped, _ = plan_moves(
             files, dates, Path("/out"), move_raw_to_orig=False,
         )
 
@@ -33,7 +33,7 @@ class TestPlanMoves:
         files = [sf("/photos/IMG.JPG")]
         dates = {"IMG.JPG": "2024_01_15_143052"}
 
-        infos, folders, _, _ = plan_moves(
+        infos, folders, _, _, _ = plan_moves(
             files, dates, Path("/out"), move_raw_to_orig=False,
         )
 
@@ -44,7 +44,7 @@ class TestPlanMoves:
         files = [sf("/photos/IMG.cr3")]
         dates = {"IMG.cr3": "2024_01_15_143052"}
 
-        infos, folders, _, _ = plan_moves(
+        infos, folders, _, _, _ = plan_moves(
             files, dates, Path("/out"), move_raw_to_orig=False,
         )
 
@@ -55,7 +55,7 @@ class TestPlanMoves:
         files = [sf("/photos/IMG.CR3")]
         dates = {"IMG.CR3": "2024_01_15_143052"}
 
-        infos, folders, _, _ = plan_moves(
+        infos, folders, _, _, _ = plan_moves(
             files, dates, Path("/out"), move_raw_to_orig=True,
         )
 
@@ -74,7 +74,7 @@ class TestPlanMoves:
             "C.cr3": "2024_01_16_100000",  # different date
         }
 
-        _, folders, _, _ = plan_moves(
+        _, folders, _, _, _ = plan_moves(
             files, dates, Path("/out"), move_raw_to_orig=False,
         )
 
@@ -84,8 +84,8 @@ class TestPlanMoves:
         """Files without EXIF should fall back to the scanned mtime date."""
         files = [sf("/photos/IMG.jpg", mtime_date="2024_02_01_120000")]
 
-        infos, _, fallback_count, skipped = plan_moves(
-            files, {}, Path("/out"), move_raw_to_orig=False,
+        infos, _, fallback_count, skipped, _ = plan_moves(
+            files, {"IMG.jpg": None}, Path("/out"), move_raw_to_orig=False,
         )
 
         assert len(infos) == 1
@@ -98,8 +98,8 @@ class TestPlanMoves:
         """Files with no EXIF and no mtime should be skipped."""
         files = [sf("/fake/IMG.jpg", mtime_date=None)]
 
-        infos, _, fallback, skipped = plan_moves(
-            files, {}, Path("/out"), move_raw_to_orig=False,
+        infos, _, fallback, skipped, _ = plan_moves(
+            files, {"IMG.jpg": None}, Path("/out"), move_raw_to_orig=False,
         )
 
         assert len(infos) == 0
@@ -109,8 +109,8 @@ class TestPlanMoves:
         """plan_moves is pure: nonexistent paths still route (no filesystem access)."""
         files = [sf("/definitely/does/not/exist/IMG.jpg", mtime_date="2024_05_05_050505")]
 
-        infos, folders, fallback, skipped = plan_moves(
-            files, {}, Path("/out"), move_raw_to_orig=False,
+        infos, folders, fallback, skipped, _ = plan_moves(
+            files, {"IMG.jpg": None}, Path("/out"), move_raw_to_orig=False,
         )
 
         assert len(infos) == 1
@@ -118,9 +118,23 @@ class TestPlanMoves:
         assert fallback == 1
         assert skipped == 0
 
+    def test_uninspected_file_is_error_not_mtime(self):
+        """A file absent from file_dates was never read by exiftool: no mtime fallback."""
+        files = [sf("/photos/IMG.jpg", mtime_date="2024_02_01_120000")]
+
+        infos, folders, fallback, skipped, unreadable = plan_moves(
+            files, {}, Path("/out"), move_raw_to_orig=False,
+        )
+
+        assert infos == []
+        assert folders == set()
+        assert fallback == 0
+        assert skipped == 0
+        assert unreadable == 1
+
     def test_empty_file_list(self):
         """Empty file list should return empty results."""
-        infos, folders, fallback, skipped = plan_moves(
+        infos, folders, fallback, skipped, _ = plan_moves(
             [], {}, Path("/out"), move_raw_to_orig=False,
         )
 
@@ -134,7 +148,7 @@ class TestPlanMoves:
         files = [sf("/photos/DSC_1234.NEF")]
         dates = {"DSC_1234.NEF": "2024_03_20_091500"}
 
-        infos, _, _, _ = plan_moves(
+        infos, _, _, _, _ = plan_moves(
             files, dates, Path("/out"), move_raw_to_orig=False,
         )
 
@@ -145,7 +159,7 @@ class TestPlanMoves:
         files = [sf("/photos/IMG.CR3")]
         dates = {"IMG.CR3": "2024_01_15_143052"}
 
-        infos, _, _, _ = plan_moves(
+        infos, _, _, _, _ = plan_moves(
             files, dates, Path("/out"), move_raw_to_orig=False,
         )
 
@@ -164,7 +178,7 @@ class TestPlanMoves:
             "IMG.dng": "2024_01_15_143052",
         }
 
-        infos, _, _, _ = plan_moves(
+        infos, _, _, _, _ = plan_moves(
             files, dates, Path("/out"), move_raw_to_orig=False,
         )
 

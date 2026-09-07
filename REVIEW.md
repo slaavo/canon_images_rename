@@ -162,3 +162,20 @@ Nowe testy: odmowa nadpisania (link / EXDEV / EPERM), katalog jako kolizja,
 brak placeholdera po nieudanym przenoszeniu, symlinki, `ScanError`,
 `ExifToolError` (timeout, kod -2, kod 1 bez wyjścia) vs częściowy sukces,
 `-@ -` na stdin, przerwanie podczas skanu EXIF, exit 1 z `main()`.
+
+
+---
+
+## Runda 7 — trzecie review Codexa (commit `d3ff890`), 2 uwagi P2
+
+Obie prawdziwe, obie są konsekwencją poprawek z rundy 6.
+
+| # | Uwaga | Poprawka |
+|---|-------|----------|
+| 1 | Plik, którego exiftool nie zdołał otworzyć, nie ma wpisu w `file_dates`, a `plan_moves()` traktował brak wpisu jak „brak EXIF" → fallback mtime, niezweryfikowana data. | Sonda na exiftool 12.76: dla każdego **otwartego** pliku (nawet uszkodzonego/pustego) jest wiersz `nazwa\t-\t-`; **brak wiersza** tylko dla plików nieotwieralnych (brak/uprawnienia). Stąd status per plik bez dodatkowego wywołania: `_run_exiftool_batch()` zwraca `dict[str, str \| None]` — wpis dla każdego wiersza (`None` = zbadany, bez daty), brak wpisu = niezbadany. `plan_moves()` zwraca dodatkowo `unreadable_count`; taki plik jest logowany jako błąd, liczony w `errors` (exit 1) i **zostaje na miejscu**. |
+| 2 | Po udanym `os.link` i nieudanym `os.unlink(source)` (katalog źródłowy bez prawa zapisu) w wyjściu zostawał hardlink mimo zgłoszonego błędu; to samo na ścieżce kopii między urządzeniami. | `_unlink_source_or_rollback()`: przy nieudanym usunięciu źródła usuwa świeżo utworzony cel i przepuszcza wyjątek. Ścieżka `os.replace` jest atomowa — bez zmian. |
+
+Nowe testy: wiersz `-` → `None`, brak wiersza → brak wpisu, `plan_moves` z `{}` →
+`unreadable == 1` bez fallbacku, `process_files` z jednym nieczytelnym plikiem →
+`(1, 1)` i plik na miejscu (także dry-run), rollback linku i kopii EXDEV przy
+nieudanym `unlink` źródła.

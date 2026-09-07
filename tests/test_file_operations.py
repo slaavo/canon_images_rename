@@ -288,6 +288,49 @@ class TestMoveSingleFile:
         assert dest.read_text() == "precious original"
         assert source.exists()
 
+    def test_link_rolled_back_when_source_unlink_fails(self, tmp_path: Path):
+        """os.link succeeded but the source cannot be removed: no dest left behind."""
+        source = tmp_path / "source.jpg"
+        source.write_text("content")
+        dest = tmp_path / "dest.jpg"
+        real_unlink = os.unlink
+
+        def unlink_fails_for_source(path, *args, **kwargs):
+            if Path(path) == source:
+                raise PermissionError(errno.EACCES, "Permission denied", str(path))
+            return real_unlink(path, *args, **kwargs)
+
+        with patch("rename_and_move_files.os.unlink", side_effect=unlink_fails_for_source):
+            result = move_single_file(source, dest, is_duplicate=False)
+
+        assert result.success is False
+        assert "Permission denied" in result.error
+        assert not dest.exists()
+        assert source.read_text() == "content"
+
+    def test_cross_device_copy_rolled_back_when_source_unlink_fails(self, tmp_path: Path):
+        """Same guarantee on the EXDEV copy path."""
+        source = tmp_path / "source.jpg"
+        source.write_text("content")
+        dest = tmp_path / "dest.jpg"
+        real_unlink = os.unlink
+
+        def unlink_fails_for_source(path, *args, **kwargs):
+            if Path(path) == source:
+                raise PermissionError(errno.EACCES, "Permission denied", str(path))
+            return real_unlink(path, *args, **kwargs)
+
+        with patch(
+            "rename_and_move_files.os.link",
+            side_effect=OSError(errno.EXDEV, "Invalid cross-device link"),
+        ):
+            with patch("rename_and_move_files.os.unlink", side_effect=unlink_fails_for_source):
+                result = move_single_file(source, dest, is_duplicate=False)
+
+        assert result.success is False
+        assert not dest.exists()
+        assert source.read_text() == "content"
+
     def test_refuses_to_overwrite_existing_destination(self, tmp_path: Path):
         """A file created at dest after the name scan must never be clobbered."""
         source = tmp_path / "source.jpg"

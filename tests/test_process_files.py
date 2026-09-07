@@ -379,3 +379,51 @@ class TestExifReadFailure:
 
         assert (success, errors) == (0, 0)
         assert list(output_dir.iterdir()) == []
+
+
+class TestUnreadableFile:
+    """A file exiftool could not open is an error and is left in place."""
+
+    def _setup(self, tmp_path: Path) -> tuple[Path, Path]:
+        input_dir = tmp_path / "input"
+        output_dir = tmp_path / "output"
+        input_dir.mkdir()
+        output_dir.mkdir()
+        (input_dir / "good.jpg").write_text("good")
+        (input_dir / "bad.jpg").write_text("bad")
+        return input_dir, output_dir
+
+    def _mock_exiftool_missing_bad(self):
+        mock_result = MagicMock()
+        mock_result.returncode = 1  # exiftool: one file had an error
+        mock_result.stdout = "good.jpg\t2024_01_15_143052\t-\n"  # no row for bad.jpg
+        mock_result.stderr = "Error: File not found - bad.jpg\n"
+        return patch("rename_and_move_files.subprocess.run", return_value=mock_result)
+
+    def test_unreadable_file_is_error_and_not_moved(self, tmp_path: Path):
+        input_dir, output_dir = self._setup(tmp_path)
+
+        with self._mock_exiftool_missing_bad():
+            success, errors = process_files(
+                input_dir, output_dir,
+                move_raw_to_orig=False, dry_run=False,
+                interrupt_handler=InterruptHandler(), workers=1,
+            )
+
+        assert (success, errors) == (1, 1)
+        assert (input_dir / "bad.jpg").read_text() == "bad"
+        moved = sorted(p.name for p in output_dir.rglob("*.jpg"))
+        assert moved == ["2024_01_15_143052_good.jpg"]
+
+    def test_unreadable_file_counted_in_dry_run(self, tmp_path: Path):
+        input_dir, output_dir = self._setup(tmp_path)
+
+        with self._mock_exiftool_missing_bad():
+            success, errors = process_files(
+                input_dir, output_dir,
+                move_raw_to_orig=False, dry_run=True,
+                interrupt_handler=InterruptHandler(), workers=1,
+            )
+
+        assert (success, errors) == (1, 1)
+        assert list(output_dir.iterdir()) == []

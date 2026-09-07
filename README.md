@@ -106,6 +106,7 @@ With `-r`, RAW files also go to `!orig/`.
 - **Ctrl+C** — Finishes current operations, reports progress
 - **No EXIF date** — Falls back to file modification date; skips file only if neither is available
 - **exiftool failure** (timeout, killed) — Aborts with exit code 1 before moving anything; dates are unknown, so no mtime fallback
+- **Unreadable file** (exiftool could not open it) — Reported as an error and left in place; never filed by mtime
 - **Symbolic links** — Skipped (moving a link would break relative targets)
 - **Existing destination** — Never overwritten; a name that becomes taken mid-run is reported as an error
 

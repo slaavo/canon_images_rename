@@ -247,7 +247,7 @@ def validate_date(date_str: str | None) -> str | None:
     return date_str
 
 
-def _run_exiftool_batch(batch: list[Path], fast_flag: str) -> dict[str, str]:
+def _run_exiftool_batch(batch: list[Path], fast_flag: str) -> dict[str, str | None]:
     """
     Run exiftool on a single batch of files.
 
@@ -255,20 +255,24 @@ def _run_exiftool_batch(batch: list[Path], fast_flag: str) -> dict[str, str]:
     and TIFF-based RAW) or "-fast" (QuickTime containers, where -fast2
     would stop at mdat and could miss the date tags).
 
-    Returns a dict mapping filename -> formatted date string.
+    Returns a dict with one entry per file exiftool could open: filename ->
+    formatted date string, or None when the file has no date tag. Files
+    exiftool could not open at all (missing, permission denied) produce no
+    output row and are therefore absent — the caller must treat "absent" as
+    "not inspected", never as "no EXIF".
 
     Raises ExifToolError if exiftool timed out, was killed by a signal, or
     exited non-zero without producing any output. A non-zero exit *with*
     output is exiftool's normal "some files had errors" and is only logged.
     """
-    results: dict[str, str] = {}
+    results: dict[str, str | None] = {}
 
-    # An arg file cannot express a newline inside a path; such files are
-    # left to the mtime fallback.
+    # An arg file cannot express a newline inside a path; such a file is not
+    # inspected and will be reported as unreadable.
     paths: list[str] = []
     for f in batch:
         if "\n" in str(f):
-            log.warning(f"Skipping EXIF read for path containing a newline: {f.name!r}")
+            log.warning(f"Cannot pass path containing a newline to exiftool: {f.name!r}")
             continue
         paths.append(str(f))
     if not paths:
@@ -333,10 +337,9 @@ def _run_exiftool_batch(batch: list[Path], fast_flag: str) -> dict[str, str]:
         date_original = validate_date(parts[1].strip())
         date_create = validate_date(parts[2].strip()) if len(parts) >= 3 else None
 
-        # Prefer DateTimeOriginal, fall back to CreateDate
-        date_value = date_original or date_create
-        if date_value:
-            results[filename] = date_value
+        # Prefer DateTimeOriginal, fall back to CreateDate. A row with no
+        # date still gets an entry (None): exiftool inspected the file.
+        results[filename] = date_original or date_create
 
     return results
 
@@ -348,7 +351,7 @@ def _exiftool_fast_flag(file: Path) -> str:
     return "-fast2"
 
 
-def get_exif_dates(files: list[Path]) -> dict[str, str]:
+def get_exif_dates(files: list[Path]) -> dict[str, str | None]:
     """
     Get dates for all files via exiftool.
 
@@ -358,7 +361,9 @@ def get_exif_dates(files: list[Path]) -> dict[str, str]:
     parallel (exiftool is single-threaded, so concurrent processes overlap
     CPU and I/O).
 
-    Returns a dict mapping filename -> formatted date string.
+    Returns a dict with one entry per inspected file: filename -> formatted
+    date string, or None if the file has no date tag. Files exiftool could
+    not open are absent (see _run_exiftool_batch).
 
     Raises ExifToolError if any batch fails (see _run_exiftool_batch).
     """
@@ -375,7 +380,7 @@ def get_exif_dates(files: list[Path]) -> dict[str, str]:
         for i in range(0, len(group), EXIFTOOL_BATCH_SIZE)
     ]
 
-    file_dates: dict[str, str] = {}
+    file_dates: dict[str, str | None] = {}
 
     if len(batches) == 1:
         batch, fast_flag = batches[0]
@@ -546,6 +551,14 @@ class MoveResult(NamedTuple):
     is_duplicate: bool = False
 
 
+def _remove_quietly(path: Path) -> None:
+    """Best-effort unlink used for rollback; errors are ignored."""
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+
+
 def _copy_exclusive(source: Path, dest: Path) -> None:
     """Copy source to dest, creating dest exclusively (never overwrites)."""
     fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
@@ -554,10 +567,20 @@ def _copy_exclusive(source: Path, dest: Path) -> None:
             shutil.copyfileobj(src, dst)
         shutil.copystat(source, dest)
     except BaseException:
-        try:
-            os.unlink(dest)
-        except OSError:
-            pass
+        _remove_quietly(dest)
+        raise
+
+
+def _unlink_source_or_rollback(source: Path, dest: Path) -> None:
+    """
+    Remove the source after dest has been created. If that fails (e.g. the
+    source folder is not writable), remove dest again so a failed move never
+    leaves a copy behind that later runs would treat as a collision.
+    """
+    try:
+        os.unlink(source)
+    except OSError:
+        _remove_quietly(dest)
         raise
 
 
@@ -569,7 +592,7 @@ def _move_no_clobber(source: Path, dest: Path) -> None:
     atomically first: os.link() fails with FileExistsError if dest exists.
     Filesystems without hard links (FAT/exFAT SD cards) get an O_EXCL
     placeholder that our own rename then replaces; cross-device moves use an
-    exclusive-create copy.
+    exclusive-create copy. A failed move never leaves dest behind.
     """
     try:
         os.link(source, dest)
@@ -578,22 +601,20 @@ def _move_no_clobber(source: Path, dest: Path) -> None:
     except OSError as e:
         if e.errno == errno.EXDEV:
             _copy_exclusive(source, dest)
-            os.unlink(source)
+            _unlink_source_or_rollback(source, dest)
             return
         # No hard-link support: claim the name, then replace our placeholder.
-        # os.replace (not os.rename) so this also works on Windows.
+        # os.replace (not os.rename) so this also works on Windows; it is
+        # atomic, so there is nothing to roll back on failure but the claim.
         fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
         os.close(fd)
         try:
             os.replace(source, dest)
         except OSError:
-            try:
-                os.unlink(dest)
-            except OSError:
-                pass
+            _remove_quietly(dest)
             raise
         return
-    os.unlink(source)
+    _unlink_source_or_rollback(source, dest)
 
 
 def move_single_file(
@@ -668,26 +689,35 @@ def validate_paths(input_folder: Path, output_folder: Path) -> bool:
 
 def plan_moves(
     files: list[ScannedFile],
-    file_dates: dict[str, str],
+    file_dates: dict[str, str | None],
     output_folder: Path,
     move_raw_to_orig: bool,
-) -> tuple[list[FileInfo], set[str], int, int]:
+) -> tuple[list[FileInfo], set[str], int, int, int]:
     """
     Build FileInfo list and collect date folders.
 
-    Pure function — no I/O. The mtime fallback uses the date captured
-    during the directory scan (ScannedFile.mtime_date).
+    Pure function — no I/O. file_dates follows get_exif_dates(): a file
+    absent from it was never inspected by exiftool (unreadable) and is
+    reported as an error, never dated by mtime; a None value means exiftool
+    inspected the file and found no date tag, so the mtime captured during
+    the directory scan (ScannedFile.mtime_date) is used.
 
     Returns:
-        (file_infos, date_folders, fallback_count, skipped_count)
+        (file_infos, date_folders, fallback_count, skipped_count, unreadable_count)
     """
     file_infos: list[FileInfo] = []
     date_folders: set[str] = set()
     skipped_count = 0
     fallback_count = 0
+    unreadable_count = 0
 
     for file, mtime_date in files:
-        datetime_str = file_dates.get(file.name)
+        if file.name not in file_dates:
+            log.error(f"Could not read metadata: {file.name} (skipping)")
+            unreadable_count += 1
+            continue
+
+        datetime_str = file_dates[file.name]
         used_fallback = False
 
         if not datetime_str:
@@ -729,7 +759,7 @@ def plan_moves(
             dest_folder=dest_folder,
         ))
 
-    return file_infos, date_folders, fallback_count, skipped_count
+    return file_infos, date_folders, fallback_count, skipped_count, unreadable_count
 
 
 def process_files(
@@ -768,7 +798,8 @@ def process_files(
             return 0, 0
         log.error(f"EXIF read failed — nothing was moved: {e}")
         return 0, 1
-    log.info(f"Got EXIF dates for {len(file_dates)}/{len(files)} files")
+    dated = sum(1 for d in file_dates.values() if d)
+    log.info(f"Got EXIF dates for {dated}/{len(files)} files")
 
     # A Ctrl+C during the EXIF scan must stop us here, before anything touches
     # the disk; the flag is otherwise only observed inside the move loop.
@@ -778,7 +809,7 @@ def process_files(
 
     # Prepare file info and collect unique date folders
     log.info("Preparing file operations...")
-    file_infos, date_folders, fallback_count, skipped_count = plan_moves(
+    file_infos, date_folders, fallback_count, skipped_count, unreadable_count = plan_moves(
         files, file_dates, output_folder, move_raw_to_orig,
     )
 
@@ -788,9 +819,12 @@ def process_files(
     if skipped_count > 0:
         log.warning(f"Skipping {skipped_count} files without any date metadata")
 
+    if unreadable_count > 0:
+        log.error(f"{unreadable_count} files could not be read by exiftool — left in place")
+
     if not file_infos:
         log.warning("No files to process after filtering")
-        return 0, 0
+        return 0, unreadable_count
 
     # Pre-create all folders (skip in dry-run)
     if not dry_run:
@@ -817,13 +851,13 @@ def process_files(
         for source, dest_path, is_duplicate in move_tasks:
             suffix = " (renamed: duplicate)" if is_duplicate else ""
             print(f"  {source.name} -> {dest_path}{suffix}")
-        return total, 0
+        return total, unreadable_count
 
     # Move files in parallel
     log.info(f"Moving files (using {workers} workers)...")
 
     success_count = 0
-    error_count = 0
+    error_count = unreadable_count  # files exiftool could not open
     completed = 0
 
     # Throttle progress updates to ~100 updates total
