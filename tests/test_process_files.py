@@ -5,7 +5,12 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from rename_and_move_files import process_files, InterruptHandler, MoveResult
+from rename_and_move_files import (
+    ExifToolError,
+    InterruptHandler,
+    MoveResult,
+    process_files,
+)
 
 
 class TestProcessFiles:
@@ -304,3 +309,179 @@ class TestInterruptDuringMove:
         assert handler.interrupted is True
         assert success == 1
         assert errors == 0
+
+
+class TestExifReadFailure:
+    """exiftool failure or an interrupt during the EXIF scan must move nothing."""
+
+    def _make_photos(self, tmp_path: Path) -> tuple[Path, Path]:
+        input_dir = tmp_path / "input"
+        output_dir = tmp_path / "output"
+        input_dir.mkdir()
+        output_dir.mkdir()
+        (input_dir / "photo.jpg").write_text("data")
+        return input_dir, output_dir
+
+    def test_exiftool_failure_moves_nothing(self, tmp_path: Path):
+        """A timeout/killed exiftool is an error; no mtime fallback, no moves."""
+        input_dir, output_dir = self._make_photos(tmp_path)
+
+        with patch(
+            "rename_and_move_files.get_exif_dates",
+            side_effect=ExifToolError("exiftool timed out"),
+        ):
+            handler = InterruptHandler()
+            success, errors = process_files(
+                input_dir, output_dir,
+                move_raw_to_orig=False, dry_run=False,
+                interrupt_handler=handler, workers=1,
+            )
+
+        assert (success, errors) == (0, 1)
+        assert (input_dir / "photo.jpg").exists()
+        assert list(output_dir.iterdir()) == []
+
+    def test_interrupt_during_exif_read_moves_nothing(self, tmp_path: Path):
+        """Ctrl+C during the EXIF scan stops before any folder is created."""
+        input_dir, output_dir = self._make_photos(tmp_path)
+        handler = InterruptHandler()
+
+        def interrupting_exif(files):
+            handler.interrupted = True
+            return {"photo.jpg": "2024_01_15_143052"}
+
+        with patch("rename_and_move_files.get_exif_dates", side_effect=interrupting_exif):
+            success, errors = process_files(
+                input_dir, output_dir,
+                move_raw_to_orig=False, dry_run=False,
+                interrupt_handler=handler, workers=1,
+            )
+
+        assert (success, errors) == (0, 0)
+        assert (input_dir / "photo.jpg").exists()
+        assert list(output_dir.iterdir()) == []
+
+    def test_interrupt_that_kills_exiftool_is_not_an_error(self, tmp_path: Path):
+        """Ctrl+C kills the exiftool child too; report an interrupt, not a failure."""
+        input_dir, output_dir = self._make_photos(tmp_path)
+        handler = InterruptHandler()
+
+        def killed_exif(files):
+            handler.interrupted = True
+            raise ExifToolError("exiftool failed with exit code -2")
+
+        with patch("rename_and_move_files.get_exif_dates", side_effect=killed_exif):
+            success, errors = process_files(
+                input_dir, output_dir,
+                move_raw_to_orig=False, dry_run=False,
+                interrupt_handler=handler, workers=1,
+            )
+
+        assert (success, errors) == (0, 0)
+        assert list(output_dir.iterdir()) == []
+
+
+class TestUnreadableFile:
+    """A file exiftool could not open is an error and is left in place."""
+
+    def _setup(self, tmp_path: Path) -> tuple[Path, Path]:
+        input_dir = tmp_path / "input"
+        output_dir = tmp_path / "output"
+        input_dir.mkdir()
+        output_dir.mkdir()
+        (input_dir / "good.jpg").write_text("good")
+        (input_dir / "bad.jpg").write_text("bad")
+        return input_dir, output_dir
+
+    def _mock_exiftool_missing_bad(self):
+        mock_result = MagicMock()
+        mock_result.returncode = 1  # exiftool: one file had an error
+        mock_result.stdout = "good.jpg\t2024_01_15_143052\t-\n"  # no row for bad.jpg
+        mock_result.stderr = "Error: File not found - bad.jpg\n"
+        return patch("rename_and_move_files.subprocess.run", return_value=mock_result)
+
+    def test_unreadable_file_is_error_and_not_moved(self, tmp_path: Path):
+        input_dir, output_dir = self._setup(tmp_path)
+
+        with self._mock_exiftool_missing_bad():
+            success, errors = process_files(
+                input_dir, output_dir,
+                move_raw_to_orig=False, dry_run=False,
+                interrupt_handler=InterruptHandler(), workers=1,
+            )
+
+        assert (success, errors) == (1, 1)
+        assert (input_dir / "bad.jpg").read_text() == "bad"
+        moved = sorted(p.name for p in output_dir.rglob("*.jpg"))
+        assert moved == ["2024_01_15_143052_good.jpg"]
+
+    def test_unreadable_file_counted_in_dry_run(self, tmp_path: Path):
+        input_dir, output_dir = self._setup(tmp_path)
+
+        with self._mock_exiftool_missing_bad():
+            success, errors = process_files(
+                input_dir, output_dir,
+                move_raw_to_orig=False, dry_run=True,
+                interrupt_handler=InterruptHandler(), workers=1,
+            )
+
+        assert (success, errors) == (1, 1)
+        assert list(output_dir.iterdir()) == []
+
+
+class TestLazyMtime:
+    """mtime is fetched only for files exiftool inspected and found no date for."""
+
+    def test_mtime_fetched_only_for_files_without_exif(self, tmp_path: Path):
+        input_dir = tmp_path / "input"
+        output_dir = tmp_path / "output"
+        input_dir.mkdir()
+        output_dir.mkdir()
+        for n in ("a.jpg", "b.jpg", "c.jpg"):
+            (input_dir / n).write_text(n)
+
+        mock_result = MagicMock()
+        mock_result.returncode = 1
+        # a: dated; b: inspected, no date; c: no row (unreadable)
+        mock_result.stdout = "a.jpg\t2024_01_15_143052\t-\nb.jpg\t-\t-\n"
+        mock_result.stderr = "Error: File not found - c.jpg\n"
+
+        import rename_and_move_files as m
+        real_get_mtime_dates = m.get_mtime_dates
+
+        with patch("rename_and_move_files.subprocess.run", return_value=mock_result):
+            with patch(
+                "rename_and_move_files.get_mtime_dates",
+                side_effect=real_get_mtime_dates,
+            ) as mock_mtime:
+                success, errors = process_files(
+                    input_dir, output_dir,
+                    move_raw_to_orig=False, dry_run=True,
+                    interrupt_handler=InterruptHandler(), workers=1,
+                )
+
+        mock_mtime.assert_called_once()
+        assert [p.name for p in mock_mtime.call_args[0][0]] == ["b.jpg"]
+        assert (success, errors) == (2, 1)
+
+    def test_no_stat_when_every_file_has_exif(self, tmp_path: Path):
+        input_dir = tmp_path / "input"
+        output_dir = tmp_path / "output"
+        input_dir.mkdir()
+        output_dir.mkdir()
+        (input_dir / "a.jpg").write_text("a")
+
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = "a.jpg\t2024_01_15_143052\t-\n"
+        mock_result.stderr = ""
+
+        with patch("rename_and_move_files.subprocess.run", return_value=mock_result):
+            with patch("rename_and_move_files.get_mtime_dates") as mock_mtime:
+                process_files(
+                    input_dir, output_dir,
+                    move_raw_to_orig=False, dry_run=True,
+                    interrupt_handler=InterruptHandler(), workers=1,
+                )
+
+        mock_mtime.assert_not_called()

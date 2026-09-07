@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import patch
 
 from rename_and_move_files import plan_moves
+
+
+def sf(path: str) -> Path:
+    """Shorthand for a scanned file path."""
+    return Path(path)
 
 
 class TestPlanMoves:
@@ -13,11 +17,11 @@ class TestPlanMoves:
 
     def test_jpeg_routed_to_orig(self):
         """JPEG files should always go to !orig/ subfolder."""
-        files = [Path("/photos/IMG.jpg")]
+        files = [sf("/photos/IMG.jpg")]
         dates = {"IMG.jpg": "2024_01_15_143052"}
 
-        infos, folders, fallback, skipped = plan_moves(
-            files, dates, Path("/out"), move_raw_to_orig=False,
+        infos, folders, fallback, skipped, _ = plan_moves(
+            files, dates, {}, Path("/out"), move_raw_to_orig=False,
         )
 
         assert len(infos) == 1
@@ -26,33 +30,33 @@ class TestPlanMoves:
 
     def test_jpeg_uppercase_routed_to_orig(self):
         """JPEG files with uppercase extension should also go to !orig/."""
-        files = [Path("/photos/IMG.JPG")]
+        files = [sf("/photos/IMG.JPG")]
         dates = {"IMG.JPG": "2024_01_15_143052"}
 
-        infos, folders, _, _ = plan_moves(
-            files, dates, Path("/out"), move_raw_to_orig=False,
+        infos, folders, _, _, _ = plan_moves(
+            files, dates, {}, Path("/out"), move_raw_to_orig=False,
         )
 
         assert infos[0].dest_folder == Path("/out/2024_01_15/!orig")
 
     def test_raw_stays_in_root_by_default(self):
         """RAW files should stay in date folder root without -r flag."""
-        files = [Path("/photos/IMG.cr3")]
+        files = [sf("/photos/IMG.cr3")]
         dates = {"IMG.cr3": "2024_01_15_143052"}
 
-        infos, folders, _, _ = plan_moves(
-            files, dates, Path("/out"), move_raw_to_orig=False,
+        infos, folders, _, _, _ = plan_moves(
+            files, dates, {}, Path("/out"), move_raw_to_orig=False,
         )
 
         assert infos[0].dest_folder == Path("/out/2024_01_15")
 
     def test_raw_goes_to_orig_with_flag(self):
         """RAW files should go to !orig/ with move_raw_to_orig=True."""
-        files = [Path("/photos/IMG.CR3")]
+        files = [sf("/photos/IMG.CR3")]
         dates = {"IMG.CR3": "2024_01_15_143052"}
 
-        infos, folders, _, _ = plan_moves(
-            files, dates, Path("/out"), move_raw_to_orig=True,
+        infos, folders, _, _, _ = plan_moves(
+            files, dates, {}, Path("/out"), move_raw_to_orig=True,
         )
 
         assert infos[0].dest_folder == Path("/out/2024_01_15/!orig")
@@ -60,9 +64,9 @@ class TestPlanMoves:
     def test_date_folders_collected(self):
         """Unique date folders should be collected."""
         files = [
-            Path("/photos/A.jpg"),
-            Path("/photos/B.jpg"),
-            Path("/photos/C.cr3"),
+            sf("/photos/A.jpg"),
+            sf("/photos/B.jpg"),
+            sf("/photos/C.cr3"),
         ]
         dates = {
             "A.jpg": "2024_01_15_100000",
@@ -70,41 +74,73 @@ class TestPlanMoves:
             "C.cr3": "2024_01_16_100000",  # different date
         }
 
-        _, folders, _, _ = plan_moves(
-            files, dates, Path("/out"), move_raw_to_orig=False,
+        _, folders, _, _, _ = plan_moves(
+            files, dates, {}, Path("/out"), move_raw_to_orig=False,
         )
 
         assert folders == {"2024_01_15", "2024_01_16"}
 
-    def test_fallback_to_mtime(self, tmp_path: Path):
-        """Files without EXIF should fall back to file modification date."""
-        test_file = tmp_path / "IMG.jpg"
-        test_file.touch()
+    def test_fallback_to_mtime(self):
+        """Files without EXIF should fall back to the scanned mtime date."""
+        files = [sf("/photos/IMG.jpg")]
 
-        infos, _, fallback_count, skipped = plan_moves(
-            [test_file], {}, Path("/out"), move_raw_to_orig=False,
+        infos, _, fallback_count, skipped, _ = plan_moves(
+            files, {"IMG.jpg": None}, {"IMG.jpg": "2024_02_01_120000"},
+            Path("/out"), move_raw_to_orig=False,
         )
 
         assert len(infos) == 1
+        assert infos[0].datetime_str == "2024_02_01_120000"
+        assert infos[0].dest_folder == Path("/out/2024_02_01/!orig")
         assert fallback_count == 1
         assert skipped == 0
 
-    def test_skips_file_without_any_date(self, tmp_path: Path):
+    def test_skips_file_without_any_date(self):
         """Files with no EXIF and no mtime should be skipped."""
-        files = [Path("/fake/IMG.jpg")]
+        files = [sf("/fake/IMG.jpg")]
 
-        with patch("rename_and_move_files.get_file_mod_date", return_value=None):
-            infos, _, fallback, skipped = plan_moves(
-                files, {}, Path("/out"), move_raw_to_orig=False,
-            )
+        infos, _, fallback, skipped, _ = plan_moves(
+            files, {"IMG.jpg": None}, {"IMG.jpg": None},
+            Path("/out"), move_raw_to_orig=False,
+        )
 
         assert len(infos) == 0
         assert skipped == 1
 
+    def test_no_io_for_nonexistent_paths(self):
+        """plan_moves is pure: nonexistent paths still route (no filesystem access)."""
+        files = [sf("/definitely/does/not/exist/IMG.jpg")]
+
+        infos, folders, fallback, skipped, _ = plan_moves(
+            files, {"IMG.jpg": None}, {"IMG.jpg": "2024_05_05_050505"},
+            Path("/out"), move_raw_to_orig=False,
+        )
+
+        assert len(infos) == 1
+        assert folders == {"2024_05_05"}
+        assert fallback == 1
+        assert skipped == 0
+
+    def test_uninspected_file_is_error_not_mtime(self):
+        """A file absent from file_dates was never read by exiftool: no mtime fallback."""
+        files = [sf("/photos/IMG.jpg")]
+
+        # Even with an mtime available, an uninspected file must not use it.
+        infos, folders, fallback, skipped, unreadable = plan_moves(
+            files, {}, {"IMG.jpg": "2024_02_01_120000"},
+            Path("/out"), move_raw_to_orig=False,
+        )
+
+        assert infos == []
+        assert folders == set()
+        assert fallback == 0
+        assert skipped == 0
+        assert unreadable == 1
+
     def test_empty_file_list(self):
         """Empty file list should return empty results."""
-        infos, folders, fallback, skipped = plan_moves(
-            [], {}, Path("/out"), move_raw_to_orig=False,
+        infos, folders, fallback, skipped, _ = plan_moves(
+            [], {}, {}, Path("/out"), move_raw_to_orig=False,
         )
 
         assert infos == []
@@ -114,22 +150,22 @@ class TestPlanMoves:
 
     def test_filename_format(self):
         """Generated filename should be YYYY_MM_DD_HHMMSS_stem.ext."""
-        files = [Path("/photos/DSC_1234.NEF")]
+        files = [sf("/photos/DSC_1234.NEF")]
         dates = {"DSC_1234.NEF": "2024_03_20_091500"}
 
-        infos, _, _, _ = plan_moves(
-            files, dates, Path("/out"), move_raw_to_orig=False,
+        infos, _, _, _, _ = plan_moves(
+            files, dates, {}, Path("/out"), move_raw_to_orig=False,
         )
 
         assert infos[0].new_filename == "2024_03_20_091500_DSC_1234.NEF"
 
     def test_preserves_original_extension_case(self):
         """Extension case should be preserved in the new filename."""
-        files = [Path("/photos/IMG.CR3")]
+        files = [sf("/photos/IMG.CR3")]
         dates = {"IMG.CR3": "2024_01_15_143052"}
 
-        infos, _, _, _ = plan_moves(
-            files, dates, Path("/out"), move_raw_to_orig=False,
+        infos, _, _, _, _ = plan_moves(
+            files, dates, {}, Path("/out"), move_raw_to_orig=False,
         )
 
         assert infos[0].new_filename.endswith(".CR3")
@@ -137,9 +173,9 @@ class TestPlanMoves:
     def test_mixed_jpeg_and_raw_routing(self):
         """Mixed JPEG and RAW files should be routed correctly."""
         files = [
-            Path("/photos/IMG.jpg"),
-            Path("/photos/IMG.cr3"),
-            Path("/photos/IMG.dng"),
+            sf("/photos/IMG.jpg"),
+            sf("/photos/IMG.cr3"),
+            sf("/photos/IMG.dng"),
         ]
         dates = {
             "IMG.jpg": "2024_01_15_143052",
@@ -147,8 +183,8 @@ class TestPlanMoves:
             "IMG.dng": "2024_01_15_143052",
         }
 
-        infos, _, _, _ = plan_moves(
-            files, dates, Path("/out"), move_raw_to_orig=False,
+        infos, _, _, _, _ = plan_moves(
+            files, dates, {}, Path("/out"), move_raw_to_orig=False,
         )
 
         # JPEG -> !orig

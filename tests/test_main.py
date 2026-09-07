@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from rename_and_move_files import main, __version__
+from rename_and_move_files import ScanError, main, __version__
 
 
 class TestMain:
@@ -154,3 +154,18 @@ class TestMain:
 
         assert result == 0
         assert not output_dir.exists()
+
+    def test_scan_error_returns_1(self, tmp_path: Path):
+        """An unreadable input folder must not exit 0 as if it were empty."""
+        inp = tmp_path / "input"
+        inp.mkdir()
+
+        with patch.object(sys, "argv", ["prog", str(inp)]):
+            with patch("rename_and_move_files.check_exiftool", return_value=True):
+                with patch(
+                    "rename_and_move_files.process_files",
+                    side_effect=ScanError("Permission denied"),
+                ):
+                    result = main()
+
+        assert result == 1
