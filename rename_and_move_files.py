@@ -112,6 +112,10 @@ EXIFTOOL_BATCH_SIZE = 5000
 # Max concurrent exiftool processes when more than one batch is needed
 EXIFTOOL_MAX_PARALLEL = 4
 
+# Windows needs exiftool told that arg-file names are UTF-8 (see
+# _run_exiftool_batch); a module flag so tests can exercise both paths.
+_IS_WINDOWS = os.name == "nt"
+
 # Default number of parallel workers for file operations.
 # 12 is a good default for SSD/NVMe; use 1-2 for HDD.
 DEFAULT_WORKERS = 12
@@ -267,21 +271,29 @@ def _run_exiftool_batch(batch: list[Path], fast_flag: str) -> dict[str, str | No
     if not paths:
         return results
 
+    # File paths go on stdin as an arg file (-@ -) so argv size never hits
+    # platform limits (ARG_MAX on POSIX, ~32K chars on Windows). Paths are
+    # absolute, so none can start with "-" and be parsed as an option.
+    #
+    # The subprocess runs in bytes mode, never text=True: the locale encoding
+    # would crash on paths that are not valid in it (a non-UTF-8 folder name
+    # on POSIX, anything outside the ANSI code page on Windows). os.fsencode
+    # gives the raw filesystem bytes on POSIX, which exiftool opens as-is, and
+    # UTF-8 on Windows, which exiftool needs "-charset filename=utf8" to
+    # decode. The output is parsed as bytes as well (see below).
+    charset_args = ["-charset", "filename=utf8"] if _IS_WINDOWS else []
     try:
         # -d (date format) must come before the tags it applies to.
-        # File paths go on stdin as an arg file (-@ -) so argv size never hits
-        # platform limits (ARG_MAX on POSIX, ~32K chars on Windows). Paths are
-        # absolute, so none can start with "-" and be parsed as an option.
         result = subprocess.run(
             [
                 "exiftool", "-T", fast_flag,
                 "-d", "%Y_%m_%d_%H%M%S",
+                *charset_args,
                 "-filename", "-DateTimeOriginal", "-CreateDate",
                 "-@", "-",
             ],
-            input="\n".join(paths),
+            input=b"\n".join(os.fsencode(p) for p in paths),
             capture_output=True,
-            text=True,
             timeout=EXIFTOOL_TIMEOUT,
         )
     except subprocess.TimeoutExpired:
@@ -291,8 +303,9 @@ def _run_exiftool_batch(batch: list[Path], fast_flag: str) -> dict[str, str | No
         ) from None
 
     # Log any stderr output (warnings, errors from exiftool)
-    if result.stderr.strip():
-        for line in result.stderr.strip().split("\n"):
+    stderr = result.stderr.decode(errors="replace").strip()
+    if stderr:
+        for line in stderr.splitlines():
             log.debug(f"exiftool: {line}")
 
     has_output = bool(result.stdout.strip())
@@ -311,20 +324,29 @@ def _run_exiftool_batch(batch: list[Path], fast_flag: str) -> dict[str, str | No
             f"(batch of {len(paths)} files) — some files may be unreadable"
         )
 
-    # Parse tab-separated output: filename \t DateTimeOriginal \t CreateDate
+    # Parse tab-separated output: filename \t DateTimeOriginal \t CreateDate.
+    # Split on b"\n" and strip "\r" (Windows line ends); str.splitlines() would
+    # also split names containing U+2028/U+0085. exiftool echoes file names as
+    # raw bytes, and os.fsdecode() turns them into exactly the str that
+    # scandir produced for file.name, so the keys match. A name echoed
+    # differently just fails to match and is reported as unreadable (a safe
+    # failure, never a wrong date).
     if not has_output:
         return results
 
-    for line in result.stdout.strip().split("\n"):
-        parts = line.split("\t")
+    for raw_line in result.stdout.strip().split(b"\n"):
+        parts = raw_line.rstrip(b"\r").split(b"\t")
         if len(parts) < 2:
             continue
 
         # exiftool may return a full path; extract the filename only
-        filename = Path(parts[0]).name
+        filename = Path(os.fsdecode(parts[0])).name
 
-        date_original = validate_date(parts[1].strip())
-        date_create = validate_date(parts[2].strip()) if len(parts) >= 3 else None
+        date_original = validate_date(parts[1].decode("ascii", "replace").strip())
+        date_create = (
+            validate_date(parts[2].decode("ascii", "replace").strip())
+            if len(parts) >= 3 else None
+        )
 
         # Prefer DateTimeOriginal, fall back to CreateDate. A row with no
         # date still gets an entry (None): exiftool inspected the file.
@@ -924,6 +946,22 @@ def process_files(
     return success_count, error_count
 
 
+def _make_console_output_safe() -> None:
+    """
+    Show unencodable characters in printed file names as backslash escapes.
+
+    File names are printed as-is (dry-run preview, log messages). A name
+    that is not valid in the console encoding (e.g. a non-UTF-8 folder on
+    POSIX, decoded by Python with surrogateescape) would otherwise raise
+    UnicodeEncodeError from print() and abort the run.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="backslashreplace")
+        except (AttributeError, ValueError):
+            pass  # not a regular text stream (e.g. replaced by a test harness)
+
+
 def main() -> int:
     """Main entry point."""
     parser = argparse.ArgumentParser(
@@ -983,6 +1021,8 @@ Supported formats:
     )
 
     args = parser.parse_args()
+
+    _make_console_output_safe()
 
     # Validate workers range
     if args.workers < 1:

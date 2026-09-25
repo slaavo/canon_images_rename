@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -35,7 +36,7 @@ class TestGetExifDates:
         mock_result = MagicMock()
         mock_result.returncode = 0
         mock_result.stdout = EXIFTOOL_OUTPUT_SINGLE
-        mock_result.stderr = ""
+        mock_result.stderr = b""
 
         with patch("rename_and_move_files.subprocess.run", return_value=mock_result):
             files = [Path("/fake/IMG_001.jpg")]
@@ -48,7 +49,7 @@ class TestGetExifDates:
         mock_result = MagicMock()
         mock_result.returncode = 0
         mock_result.stdout = EXIFTOOL_OUTPUT_MULTIPLE
-        mock_result.stderr = ""
+        mock_result.stderr = b""
 
         with patch("rename_and_move_files.subprocess.run", return_value=mock_result):
             files = [
@@ -71,8 +72,8 @@ class TestGetExifDates:
         """DateTimeOriginal should be preferred over CreateDate."""
         mock_result = MagicMock()
         mock_result.returncode = 0
-        mock_result.stdout = "IMG.jpg\t2024_01_15_100000\t2024_01_15_200000\n"
-        mock_result.stderr = ""
+        mock_result.stdout = b"IMG.jpg\t2024_01_15_100000\t2024_01_15_200000\n"
+        mock_result.stderr = b""
 
         with patch("rename_and_move_files.subprocess.run", return_value=mock_result):
             dates = get_exif_dates([Path("/fake/IMG.jpg")])
@@ -84,7 +85,7 @@ class TestGetExifDates:
         mock_result = MagicMock()
         mock_result.returncode = 0
         mock_result.stdout = EXIFTOOL_OUTPUT_FALLBACK
-        mock_result.stderr = ""
+        mock_result.stderr = b""
 
         with patch("rename_and_move_files.subprocess.run", return_value=mock_result):
             dates = get_exif_dates([Path("/fake/IMG_001.jpg")])
@@ -104,8 +105,8 @@ class TestGetExifDates:
         """Empty exiftool output should return empty dict."""
         mock_result = MagicMock()
         mock_result.returncode = 0
-        mock_result.stdout = ""
-        mock_result.stderr = ""
+        mock_result.stdout = b""
+        mock_result.stderr = b""
 
         with patch("rename_and_move_files.subprocess.run", return_value=mock_result):
             dates = get_exif_dates([Path("/fake/IMG.jpg")])
@@ -116,8 +117,8 @@ class TestGetExifDates:
         """Files should be processed in batches of EXIFTOOL_BATCH_SIZE."""
         mock_result = MagicMock()
         mock_result.returncode = 0
-        mock_result.stdout = ""
-        mock_result.stderr = ""
+        mock_result.stdout = b""
+        mock_result.stderr = b""
 
         file_count = EXIFTOOL_BATCH_SIZE + 2500
         expected_batches = 2  # 5000 + 2500
@@ -151,8 +152,8 @@ class TestGetExifDates:
         """JPEG (and TIFF-based RAW) should be read with -fast2."""
         mock_result = MagicMock()
         mock_result.returncode = 0
-        mock_result.stdout = ""
-        mock_result.stderr = ""
+        mock_result.stdout = b""
+        mock_result.stderr = b""
 
         with patch("rename_and_move_files.subprocess.run", return_value=mock_result) as mock_run:
             get_exif_dates([Path("/fake/IMG.jpg"), Path("/fake/IMG.dng")])
@@ -164,8 +165,8 @@ class TestGetExifDates:
         """CR3 is a QuickTime container: -fast2 would stop at mdat, so use -fast."""
         mock_result = MagicMock()
         mock_result.returncode = 0
-        mock_result.stdout = ""
-        mock_result.stderr = ""
+        mock_result.stdout = b""
+        mock_result.stderr = b""
 
         with patch("rename_and_move_files.subprocess.run", return_value=mock_result) as mock_run:
             get_exif_dates([Path("/fake/IMG.CR3")])
@@ -202,8 +203,8 @@ class TestRunExiftoolBatch:
         """The given -fast level should appear in the exiftool argv."""
         mock_result = MagicMock()
         mock_result.returncode = 0
-        mock_result.stdout = ""
-        mock_result.stderr = ""
+        mock_result.stdout = b""
+        mock_result.stderr = b""
 
         with patch("rename_and_move_files.subprocess.run", return_value=mock_result) as mock_run:
             _run_exiftool_batch([Path("/fake/IMG.cr3")], "-fast")
@@ -217,8 +218,8 @@ class TestRunExiftoolBatch:
         """A '-' row means exiftool opened the file and found no date: keep the key."""
         mock_result = MagicMock()
         mock_result.returncode = 0
-        mock_result.stdout = "noexif.jpg\t-\t-\n"
-        mock_result.stderr = ""
+        mock_result.stdout = b"noexif.jpg\t-\t-\n"
+        mock_result.stderr = b""
 
         with patch("rename_and_move_files.subprocess.run", return_value=mock_result):
             results = _run_exiftool_batch([Path("/fake/noexif.jpg")], "-fast2")
@@ -229,8 +230,8 @@ class TestRunExiftoolBatch:
         """A file with no output row (exiftool could not open it) stays absent."""
         mock_result = MagicMock()
         mock_result.returncode = 1  # exiftool: one file had an error
-        mock_result.stdout = "good.jpg\t2024_01_15_143052\t-\n"
-        mock_result.stderr = "Error: File not found - /fake/gone.jpg\n"
+        mock_result.stdout = b"good.jpg\t2024_01_15_143052\t-\n"
+        mock_result.stderr = b"Error: File not found - /fake/gone.jpg\n"
 
         with patch("rename_and_move_files.subprocess.run", return_value=mock_result):
             results = _run_exiftool_batch(
@@ -244,8 +245,8 @@ class TestRunExiftoolBatch:
         """exiftool may return absolute paths; only filename should be used."""
         mock_result = MagicMock()
         mock_result.returncode = 0
-        mock_result.stdout = "/long/path/to/IMG.jpg\t2024_01_15_143052\t2024_01_15_143052\n"
-        mock_result.stderr = ""
+        mock_result.stdout = b"/long/path/to/IMG.jpg\t2024_01_15_143052\t2024_01_15_143052\n"
+        mock_result.stderr = b""
 
         with patch("rename_and_move_files.subprocess.run", return_value=mock_result):
             results = _run_exiftool_batch([Path("/long/path/to/IMG.jpg")], "-fast2")
@@ -256,8 +257,8 @@ class TestRunExiftoolBatch:
         """stderr from exiftool should be logged as debug."""
         mock_result = MagicMock()
         mock_result.returncode = 0
-        mock_result.stdout = "IMG.jpg\t2024_01_15_143052\t2024_01_15_143052\n"
-        mock_result.stderr = "Warning - [minor] some exiftool warning\n"
+        mock_result.stdout = b"IMG.jpg\t2024_01_15_143052\t2024_01_15_143052\n"
+        mock_result.stderr = b"Warning - [minor] some exiftool warning\n"
 
         with patch("rename_and_move_files.subprocess.run", return_value=mock_result):
             with patch("rename_and_move_files.log.debug") as mock_debug:
@@ -270,8 +271,8 @@ class TestRunExiftoolBatch:
         """Lines with fewer than 2 tab-separated fields should be skipped."""
         mock_result = MagicMock()
         mock_result.returncode = 0
-        mock_result.stdout = "malformed_line_no_tabs\n"
-        mock_result.stderr = ""
+        mock_result.stdout = b"malformed_line_no_tabs\n"
+        mock_result.stderr = b""
 
         with patch("rename_and_move_files.subprocess.run", return_value=mock_result):
             results = _run_exiftool_batch([Path("/fake/IMG.jpg")], "-fast2")
@@ -291,8 +292,8 @@ class TestRunExiftoolBatch:
         """A negative return code (killed by a signal, e.g. Ctrl+C) is a failure."""
         mock_result = MagicMock()
         mock_result.returncode = -2
-        mock_result.stdout = "IMG.jpg\t2024_01_15_143052\t2024_01_15_143052\n"  # partial output
-        mock_result.stderr = ""
+        mock_result.stdout = b"IMG.jpg\t2024_01_15_143052\t2024_01_15_143052\n"  # partial output
+        mock_result.stderr = b""
 
         with patch("rename_and_move_files.subprocess.run", return_value=mock_result):
             with pytest.raises(ExifToolError, match="exit code -2"):
@@ -302,8 +303,8 @@ class TestRunExiftoolBatch:
         """Non-zero exit with no output at all is a total failure."""
         mock_result = MagicMock()
         mock_result.returncode = 1
-        mock_result.stdout = ""
-        mock_result.stderr = "Error: something broke\n"
+        mock_result.stdout = b""
+        mock_result.stderr = b"Error: something broke\n"
 
         with patch("rename_and_move_files.subprocess.run", return_value=mock_result):
             with pytest.raises(ExifToolError):
@@ -313,8 +314,8 @@ class TestRunExiftoolBatch:
         """exiftool exits 1 when one file is unreadable but still prints the others."""
         mock_result = MagicMock()
         mock_result.returncode = 1
-        mock_result.stdout = "IMG.jpg\t2024_01_15_143052\t2024_01_15_143052\n"
-        mock_result.stderr = "Error: File not found - /fake/MISSING.jpg\n"
+        mock_result.stdout = b"IMG.jpg\t2024_01_15_143052\t2024_01_15_143052\n"
+        mock_result.stderr = b"Error: File not found - /fake/MISSING.jpg\n"
 
         with patch("rename_and_move_files.subprocess.run", return_value=mock_result):
             with patch("rename_and_move_files.log.warning") as mock_warn:
@@ -329,8 +330,8 @@ class TestRunExiftoolBatch:
         """File list goes to exiftool via '-@ -' on stdin, never on argv (ARG_MAX)."""
         mock_result = MagicMock()
         mock_result.returncode = 0
-        mock_result.stdout = ""
-        mock_result.stderr = ""
+        mock_result.stdout = b""
+        mock_result.stderr = b""
         files = [Path("/fake/a.jpg"), Path("/fake/b.jpg")]
 
         with patch("rename_and_move_files.subprocess.run", return_value=mock_result) as mock_run:
@@ -339,14 +340,78 @@ class TestRunExiftoolBatch:
         argv = mock_run.call_args[0][0]
         assert argv[-2:] == ["-@", "-"]
         assert not any(str(f) in argv for f in files)
-        assert mock_run.call_args[1]["input"] == "/fake/a.jpg\n/fake/b.jpg"
+        assert mock_run.call_args[1]["input"] == b"/fake/a.jpg\n/fake/b.jpg"
+        # bytes mode: the locale encoding must never touch the paths
+        assert "text" not in mock_run.call_args[1]
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX raw-byte file names")
+    def test_non_utf8_directory_is_passed_as_raw_bytes(self):
+        """A non-UTF-8 byte in a folder name must reach exiftool unchanged, not crash."""
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = b"IMG.jpg\t2024_01_15_143052\t-\n"
+        mock_result.stderr = b""
+        path = Path(os.fsdecode(b"/photos/Zdj\xeacia/IMG.jpg"))  # CP1250 "ę"
+
+        with patch("rename_and_move_files.subprocess.run", return_value=mock_result) as mock_run:
+            results = _run_exiftool_batch([path], "-fast2")
+
+        assert mock_run.call_args[1]["input"] == b"/photos/Zdj\xeacia/IMG.jpg"
+        assert results == {"IMG.jpg": "2024_01_15_143052"}
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX raw-byte file names")
+    def test_non_utf8_filename_in_output_matches_scanned_name(self):
+        """exiftool echoes raw bytes; the key must equal the name scandir produced."""
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = b"IMG_\xff.jpg\t2024_01_15_143052\t-\n"
+        mock_result.stderr = b""
+        path = Path(os.fsdecode(b"/photos/IMG_\xff.jpg"))
+
+        with patch("rename_and_move_files.subprocess.run", return_value=mock_result):
+            results = _run_exiftool_batch([path], "-fast2")
+
+        assert results == {path.name: "2024_01_15_143052"}
+
+    def test_crlf_output_is_parsed(self):
+        """Windows line endings must not leak into names or dates."""
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = b"a.jpg\t2024_01_15_143052\t-\r\nb.jpg\t-\t-\r\n"
+        mock_result.stderr = b""
+
+        with patch("rename_and_move_files.subprocess.run", return_value=mock_result):
+            results = _run_exiftool_batch([Path("/fake/a.jpg"), Path("/fake/b.jpg")], "-fast2")
+
+        assert results == {"a.jpg": "2024_01_15_143052", "b.jpg": None}
+
+    def test_windows_adds_utf8_filename_charset(self):
+        """On Windows exiftool must be told the arg file carries UTF-8 names."""
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = b""
+        mock_result.stderr = b""
+
+        with patch("rename_and_move_files.subprocess.run", return_value=mock_result) as mock_run:
+            _run_exiftool_batch([Path("/fake/a.jpg")], "-fast2")
+        posix_argv = mock_run.call_args[0][0]
+
+        with patch("rename_and_move_files.subprocess.run", return_value=mock_result) as mock_run:
+            with patch("rename_and_move_files._IS_WINDOWS", True):
+                _run_exiftool_batch([Path("/fake/a.jpg")], "-fast2")
+        windows_argv = mock_run.call_args[0][0]
+
+        assert "-charset" not in posix_argv
+        i = windows_argv.index("-charset")
+        assert windows_argv[i + 1] == "filename=utf8"
+        assert windows_argv.index("-charset") < windows_argv.index("-@")
 
     def test_newline_in_path_is_skipped_with_warning(self):
         """A path containing a newline cannot be sent in an arg file; skip it."""
         mock_result = MagicMock()
         mock_result.returncode = 0
-        mock_result.stdout = ""
-        mock_result.stderr = ""
+        mock_result.stdout = b""
+        mock_result.stderr = b""
         good = Path("/fake/good.jpg")
         bad = Path("/fake/bad\nname.jpg")
 
@@ -354,7 +419,7 @@ class TestRunExiftoolBatch:
             with patch("rename_and_move_files.log.warning") as mock_warn:
                 _run_exiftool_batch([good, bad], "-fast2")
 
-        assert mock_run.call_args[1]["input"] == str(good)
+        assert mock_run.call_args[1]["input"] == os.fsencode(str(good))
         mock_warn.assert_called_once()
 
     def test_only_newline_paths_skips_exiftool(self):

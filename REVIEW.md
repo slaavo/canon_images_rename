@@ -204,3 +204,36 @@ Testy: `TestGetMtimeDates`, `test_mtime_fetched_only_for_files_without_exif`
 (a: data, b: `-`, c: brak wiersza → `get_mtime_dates([b])`),
 `test_no_stat_when_every_file_has_exif`. Weryfikacja liczbą syscalli `stat`
 (strace) na folderze z ~200 zdjęciami z EXIF — patrz commit.
+
+
+---
+
+## Runda 9 — ostatnie review przed merge (commit `a0ebb04`)
+
+Pełny przegląd całej gałęzi względem `main` plus piąta odpowiedź Codexa.
+
+**Uwaga Codexa (P2), trafna:** od rundy 6 lista plików idzie do exiftool przez
+stdin jako `str` z `text=True`, czyli kodowana ściśle kodowaniem locale. Ścieżka
+z bajtem spoza UTF-8 w nazwie katalogu (POSIX, `surrogateescape`, np. stary
+folder „Zdjęcia" w CP1250 na NAS) kończyła się niezłapanym `UnicodeEncodeError`
+i przerywała cały przebieg. Przekazywanie przez argv (sprzed rundy 6) używało
+`os.fsencode`, więc to regresja. Odtworzone na prawdziwym exiftool.
+
+**Dodatkowe aspekty z własnego review:**
+- to samo po stronie wyjścia: `stdout` dekodowany ściśle, więc nazwa *pliku*
+  spoza UTF-8 dawała `UnicodeDecodeError` (to istniało już na `main`);
+- Windows: `text=True` koduje stroną kodową ANSI (cp1250), więc znak spoza niej
+  wywracał przebieg; samo przejście na bajty UTF-8 bez flagi zepsułoby wszystkie
+  nie-ASCII nazwy na Windows;
+- dry-run `print()` przy zwykłym terminalu UTF-8 (`errors="strict"`) wywracał się
+  na takich ścieżkach (istniało już na `main`).
+
+| Zmiana | Szczegóły |
+|--------|-----------|
+| Subprocess exiftool w trybie bajtowym | `input=b"\n".join(os.fsencode(p) …)`, bez `text=True`; na Windows dodatkowo `-charset filename=utf8` (flaga `_IS_WINDOWS`). |
+| Parsowanie wyjścia jako bajty | Split po `b"\n"`, `rstrip(b"\r")`, nazwa przez `os.fsdecode` (ten sam str co z `scandir`), daty `decode("ascii")`. Sprawdzone: exiftool odsyła nazwy jako surowe bajty, klucze pasują. |
+| `_make_console_output_safe()` w `main()` | stdout/stderr z `errors="backslashreplace"`; nieenkodowalna nazwa drukuje się jako `\udcea` zamiast wywracać przebieg. |
+
+**Reszta gałęzi bez uwag:** przenoszenie bez nadpisywania i jego rollback,
+status EXIF per plik, obsługa przerwania, leniwy mtime, `-fast` dla CR3,
+dokumentacja. Windows niezweryfikowany (brak środowiska).

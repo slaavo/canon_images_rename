@@ -47,8 +47,10 @@ function:
    container allows (`-fast2` for JPEG/TIFF-based RAW, `-fast` for the
    QuickTime-backed formats in `QUICKTIME_EXTENSIONS`, i.e. CR3), then runs one
    exiftool call per batch of `EXIFTOOL_BATCH_SIZE` files. File lists go to
-   exiftool on stdin (`-@ -`), so argv size is never an issue; batching only
-   bounds per-process work, and batches run in parallel capped at
+   exiftool on stdin (`-@ -`) as filesystem bytes (`os.fsencode`; on Windows
+   plus `-charset filename=utf8`), and the output is parsed as bytes with
+   names decoded by `os.fsdecode`, so argv size is never an issue and
+   non-UTF-8 paths round-trip exactly; batching only bounds per-process work, and batches run in parallel capped at
    `EXIFTOOL_MAX_PARALLEL`. `_run_exiftool_batch()` parses the tab-separated
    output and prefers DateTimeOriginal over CreateDate. A timeout, a
    signal-killed exiftool, or a non-zero exit with no output raises
@@ -109,6 +111,12 @@ is created) and the move loop checks it to cancel not-yet-started tasks. Output 
   (usually few) files without an EXIF date; on a NAS each `stat` is a network
   round-trip. Keep `find_files()` stat-free and fetch mtimes lazily through
   `get_mtime_dates()`.
+- **Never run the exiftool subprocess with `text=True`.** The locale encoding
+  crashes on paths that are not valid in it (a non-UTF-8 folder on POSIX,
+  anything outside the ANSI code page on Windows). Keep stdin/stdout as bytes.
+  For the same reason `main()` switches stdout/stderr to
+  `errors="backslashreplace"`, so printing such a name shows an escape
+  instead of aborting the run.
 - **Never read CR3 with exiftool `-fast2` (or higher).** CR3 is a QuickTime
   container and `-fast2` stops parsing at the `mdat` atom, so a file whose
   `moov` sits after the media data loses its date and gets silently filed by

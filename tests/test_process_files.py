@@ -27,8 +27,8 @@ class TestProcessFiles:
     def _mock_exiftool(self, output: str):
         """Create a mock for subprocess.run returning exiftool output."""
         mock_result = MagicMock()
-        mock_result.stdout = output
-        mock_result.stderr = ""
+        mock_result.stdout = output.encode()
+        mock_result.stderr = b""
         mock_result.returncode = 0
         return patch("rename_and_move_files.subprocess.run", return_value=mock_result)
 
@@ -180,8 +180,8 @@ class TestMultipleWorkers:
 
     def _mock_exiftool(self, output: str):
         mock_result = MagicMock()
-        mock_result.stdout = output
-        mock_result.stderr = ""
+        mock_result.stdout = output.encode()
+        mock_result.stderr = b""
         mock_result.returncode = 0
         return patch("rename_and_move_files.subprocess.run", return_value=mock_result)
 
@@ -222,8 +222,8 @@ class TestMoveFailure:
 
     def _mock_exiftool(self, output: str):
         mock_result = MagicMock()
-        mock_result.stdout = output
-        mock_result.stderr = ""
+        mock_result.stdout = output.encode()
+        mock_result.stderr = b""
         mock_result.returncode = 0
         return patch("rename_and_move_files.subprocess.run", return_value=mock_result)
 
@@ -264,8 +264,8 @@ class TestInterruptDuringMove:
 
     def _mock_exiftool(self, output: str):
         mock_result = MagicMock()
-        mock_result.stdout = output
-        mock_result.stderr = ""
+        mock_result.stdout = output.encode()
+        mock_result.stderr = b""
         mock_result.returncode = 0
         return patch("rename_and_move_files.subprocess.run", return_value=mock_result)
 
@@ -396,8 +396,8 @@ class TestUnreadableFile:
     def _mock_exiftool_missing_bad(self):
         mock_result = MagicMock()
         mock_result.returncode = 1  # exiftool: one file had an error
-        mock_result.stdout = "good.jpg\t2024_01_15_143052\t-\n"  # no row for bad.jpg
-        mock_result.stderr = "Error: File not found - bad.jpg\n"
+        mock_result.stdout = b"good.jpg\t2024_01_15_143052\t-\n"  # no row for bad.jpg
+        mock_result.stderr = b"Error: File not found - bad.jpg\n"
         return patch("rename_and_move_files.subprocess.run", return_value=mock_result)
 
     def test_unreadable_file_is_error_and_not_moved(self, tmp_path: Path):
@@ -443,8 +443,8 @@ class TestLazyMtime:
         mock_result = MagicMock()
         mock_result.returncode = 1
         # a: dated; b: inspected, no date; c: no row (unreadable)
-        mock_result.stdout = "a.jpg\t2024_01_15_143052\t-\nb.jpg\t-\t-\n"
-        mock_result.stderr = "Error: File not found - c.jpg\n"
+        mock_result.stdout = b"a.jpg\t2024_01_15_143052\t-\nb.jpg\t-\t-\n"
+        mock_result.stderr = b"Error: File not found - c.jpg\n"
 
         import rename_and_move_files as m
         real_get_mtime_dates = m.get_mtime_dates
@@ -473,8 +473,8 @@ class TestLazyMtime:
 
         mock_result = MagicMock()
         mock_result.returncode = 0
-        mock_result.stdout = "a.jpg\t2024_01_15_143052\t-\n"
-        mock_result.stderr = ""
+        mock_result.stdout = b"a.jpg\t2024_01_15_143052\t-\n"
+        mock_result.stderr = b""
 
         with patch("rename_and_move_files.subprocess.run", return_value=mock_result):
             with patch("rename_and_move_files.get_mtime_dates") as mock_mtime:
