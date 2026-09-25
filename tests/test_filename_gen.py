@@ -24,6 +24,14 @@ class TestUniqueFilenameGenerator:
         result = gen.generate(tmp_path, "photo.jpg")
         assert result == "photo_2.jpg"
 
+    def test_conflict_with_existing_directory(self, tmp_path: Path):
+        """A directory with the target name is a collision too."""
+        (tmp_path / "photo.jpg").mkdir()
+
+        gen = UniqueFilenameGenerator()
+        result = gen.generate(tmp_path, "photo.jpg")
+        assert result == "photo_2.jpg"
+
     def test_multiple_conflicts(self, tmp_path: Path):
         """When multiple conflicts exist, increment counter."""
         (tmp_path / "photo.jpg").touch()

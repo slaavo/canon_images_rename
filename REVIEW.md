@@ -91,3 +91,196 @@ Po zmianach: **114 testów**, wszystkie przechodzą.
 |-------|-----------|
 | `setup_logging()` na poziomie modułu | Efekt uboczny przy imporcie — zostawione (zmiana komplikuje ergonomię importu) |
 | `__version__` zduplikowane z `pyproject.toml` | Zostawione — `importlib.metadata` dodaje złożoność |
+
+---
+
+## Runda 4 — optymalizacja architektury i wydajności
+
+Po zmianach: **116 testów**, wszystkie przechodzą. Wersja podbita do **1.1.0**.
+
+| # | Zmiana | Szczegóły |
+|---|--------|-----------|
+| 1 | `exiftool -fast2` | Pomija skan trailera JPEG i maker notes — czytamy tylko DateTimeOriginal/CreateDate (standardowe bloki EXIF/QuickTime na początku pliku). Największy realny zysk na folderach z JPEG (karta SD, NAS). Test `test_uses_fast2_flag`. |
+| 2 | `plan_moves()` w pełni czysta | Nowy `ScannedFile(path, mtime_date)` — mtime formatowany już w `find_files()` z cache'owanego stat-a scandir. Usunięto `get_file_mod_date()` (jeden `stat()` mniej na plik bez EXIF), testy routingu nie potrzebują żadnych mocków (usunięty mock z `test_skips_file_without_any_date`). Nowy test `test_no_io_for_nonexistent_paths`. |
+| 3 | Równoległe batche exiftool | Przy >`EXIFTOOL_BATCH_SIZE` (5000) plików batche idą przez `ThreadPoolExecutor` (max `EXIFTOOL_MAX_PARALLEL = 4` procesy). Ścieżka jedno-batchowa bez zmian. Test `test_multiple_batches_merge_results`. |
+
+Weryfikacja end-to-end z prawdziwym exiftool: pliki z `DateTimeOriginal` trafiają do
+`YYYY_MM_DD/!orig/` z poprawną nazwą (`-fast2` nadal wyciąga daty), plik bez EXIF
+używa mtime, `!jpg/` tworzony i pusty, dry-run bez efektów ubocznych.
+
+---
+
+## Runda 5 — uwaga z GitHub: `-fast2` a CR3 (kontener QuickTime)
+
+**Uwaga (PR #8):** dla CR3, których metadane QuickTime leżą *za* danymi obrazu,
+`-fast2` może pominąć DateTimeOriginal/CreateDate i po cichu wpaść na fallback
+mtime — zdjęcie ląduje pod złą datą. Dokumentacja ExifTool: `-fast2` „stops
+processing at … the mdat atom of QuickTime-format files”.
+
+**Potwierdzenie w źródłach ExifTool 12.76:** `QuickTime.pm:9505` —
+`last if $fast > 1 and $tag eq 'mdat'`; `ExifTool.pm:268` — CR3 czytany przez
+parser MOV/QuickTime. Poziom `-fast` (1) nie uruchamia tego skrótu.
+
+| # | Zmiana | Szczegóły |
+|---|--------|-----------|
+| 1 | `QUICKTIME_EXTENSIONS = {".cr3"}` | Formaty w kontenerze ISOBMFF/QuickTime — czytane z `-fast` zamiast `-fast2`. |
+| 2 | `_run_exiftool_batch(batch, fast_flag)` | Flaga `-fast*` jako parametr; usunięty mylący komentarz o „bezpieczeństwie” `-fast2`. |
+| 3 | `get_exif_dates()` grupuje po fladze | Pliki dzielone na grupy `-fast2` (JPEG, TIFF-owe RAW) i `-fast` (CR3), potem na batche; folder CR3+JPG to dwa równoległe wywołania exiftool (istniejący pool), więc czas ścienny nie rośnie. |
+| 4 | Testy | `test_jpeg_uses_fast2_flag`, `test_quicktime_raw_uses_fast_not_fast2`, `test_mixed_cr3_and_jpeg_use_separate_invocations`, `test_passes_fast_flag_to_exiftool`. |
+
+**Reprodukcja na prawdziwym exiftool:** syntetyczny plik `.cr3` (ftyp `crx `,
+`mdat`, dopiero potem `moov/mvhd` z creation_time). `exiftool -fast2` → brak
+daty; `exiftool -fast` → `2024_06_15_143022`. Po poprawce narzędzie umieszcza
+taki plik pod datą QuickTime, a nie pod mtime (sprawdzone dry-run + realny run).
+
+Bez podbicia wersji — 1.1.0 nie została jeszcze wydana (ta sama gałąź / PR #8).
+
+
+---
+
+## Runda 6 — druga tura review PR #8 (7 uwag)
+
+Po zmianach: wszystkie testy przechodzą (patrz liczba w commicie). Bez podbicia
+wersji — 1.1.0 nadal niewydana na tej gałęzi.
+
+Ocena: **wszystkie 7 uwag prawdziwe**, o bardzo różnym prawdopodobieństwie.
+Najgroźniejsza w praktyce była para #3+#4: Ctrl+C w trakcie skanu EXIF zabija
+proces exiftool, skrypt dostawał pusty słownik, ostrzegał „using file
+modification date" i przenosił wszystko według mtime.
+
+| # | Uwaga | Prawdziwa? | Prawdop. | Poprawka |
+|---|-------|-----------|----------|----------|
+| 1 | `os.rename` nadpisuje plik utworzony po skanie nazw (utrata danych) | tak | niskie | `_move_no_clobber()`: `os.link`+`unlink` (atomowo odmawia, gdy cel istnieje); na FS bez hardlinków (FAT/exFAT) placeholder `O_EXCL` + `os.replace`; między urządzeniami kopia z ekskluzywnym utworzeniem pliku. `FileExistsError` → błąd, nigdy nadpisanie. |
+| 2 | Katalog o nazwie pliku docelowego → `shutil.move` wrzuca zdjęcie do niego | tak | znikome | `_get_existing()` liczy każdy wpis katalogu; `shutil.move` usunięty z ścieżki przenoszenia. |
+| 3 | Timeout exiftool → `{}` → wszystko po mtime | tak | średnie | `ExifToolError` przy timeoucie, kodzie < 0 (sygnał) lub kodzie ≠ 0 bez wyjścia; `process_files()` przerywa **przed** jakimkolwiek przeniesieniem, exit 1. Kod ≠ 0 *z* wyjściem = częściowy sukces exiftool (sprawdzone: brakujący plik → rc=1, reszta wypisana) → tylko ostrzeżenie. |
+| 4 | Ctrl+C w trakcie skanu EXIF nie zatrzymuje przenoszenia | tak | **wysokie** | Flaga sprawdzana zaraz po skanie EXIF, przed `ensure_folders_exist()`; zabity exiftool przy ustawionej fladze raportowany jako przerwanie (exit 130), nie awaria. |
+| 5 | Symlinki traktowane jak zdjęcia | tak | niskie | `find_files()` pomija `entry.is_symlink()` (debug per link + jedno ostrzeżenie zbiorcze). |
+| 6 | Limit 5000 plików nie ogranicza bajtów argv (Linux 2 MiB, macOS 1 MiB, Windows ~32K znaków) | tak | średnie | Lista plików idzie na stdin przez `-@ -` (sprawdzone na exiftool 12.76); `EXIFTOOL_BATCH_SIZE` zostaje jako granica pracy jednego procesu i jednostka równoległości. Ścieżka z `\n` pomijana z ostrzeżeniem. |
+| 7 | `PermissionError` przy skanie → „brak plików" → exit 0 | tak | średnie | `find_files()` rzuca `ScanError`; `main()` zwraca 1. |
+
+Nowe testy: odmowa nadpisania (link / EXDEV / EPERM), katalog jako kolizja,
+brak placeholdera po nieudanym przenoszeniu, symlinki, `ScanError`,
+`ExifToolError` (timeout, kod -2, kod 1 bez wyjścia) vs częściowy sukces,
+`-@ -` na stdin, przerwanie podczas skanu EXIF, exit 1 z `main()`.
+
+
+---
+
+## Runda 7 — trzecie review Codexa (commit `d3ff890`), 2 uwagi P2
+
+Obie prawdziwe, obie są konsekwencją poprawek z rundy 6.
+
+| # | Uwaga | Poprawka |
+|---|-------|----------|
+| 1 | Plik, którego exiftool nie zdołał otworzyć, nie ma wpisu w `file_dates`, a `plan_moves()` traktował brak wpisu jak „brak EXIF" → fallback mtime, niezweryfikowana data. | Sonda na exiftool 12.76: dla każdego **otwartego** pliku (nawet uszkodzonego/pustego) jest wiersz `nazwa\t-\t-`; **brak wiersza** tylko dla plików nieotwieralnych (brak/uprawnienia). Stąd status per plik bez dodatkowego wywołania: `_run_exiftool_batch()` zwraca `dict[str, str \| None]` — wpis dla każdego wiersza (`None` = zbadany, bez daty), brak wpisu = niezbadany. `plan_moves()` zwraca dodatkowo `unreadable_count`; taki plik jest logowany jako błąd, liczony w `errors` (exit 1) i **zostaje na miejscu**. |
+| 2 | Po udanym `os.link` i nieudanym `os.unlink(source)` (katalog źródłowy bez prawa zapisu) w wyjściu zostawał hardlink mimo zgłoszonego błędu; to samo na ścieżce kopii między urządzeniami. | `_unlink_source_or_rollback()`: przy nieudanym usunięciu źródła usuwa świeżo utworzony cel i przepuszcza wyjątek. Ścieżka `os.replace` jest atomowa — bez zmian. |
+
+Nowe testy: wiersz `-` → `None`, brak wiersza → brak wpisu, `plan_moves` z `{}` →
+`unreadable == 1` bez fallbacku, `process_files` z jednym nieczytelnym plikiem →
+`(1, 1)` i plik na miejscu (także dry-run), rollback linku i kopii EXDEV przy
+nieudanym `unlink` źródła.
+
+
+---
+
+## Runda 8 — czwarte review Codexa (commit `166253c`), 1 uwaga P2
+
+**Uwaga:** „Defer mtime stat calls until fallback is needed" — `find_files()`
+wołało `entry.stat()` dla każdego zdjęcia. **Trafna, i koryguje błędne
+uzasadnienie z rundy 4:** założenie, że `DirEntry.stat()` korzysta z
+cache'a scandir, jest prawdziwe tylko na Windows. Na Uniksie
+`is_file()`/`is_symlink()` biorą typ z `d_type` bez syscalla, a
+`DirEntry.stat()` to zawsze osobny `stat`. Oryginalny kod stat-ował tylko
+pliki bez daty EXIF; zmiana z rundy 4 dodała `stat` na każdy plik — na
+folderze z aparatu regresja, na NAS wyraźna (każdy `stat` = round-trip).
+
+| Zmiana | Szczegóły |
+|--------|-----------|
+| Usunięty `ScannedFile`; `find_files()` znów zwraca `Path`-y | Skan bez żadnego `stat` per plik. |
+| Nowa `get_mtime_dates()` | Jedyny `stat` w pipeline; wołana z dokładnie tymi plikami, dla których exiftool zwrócił `None` (zbadany, bez daty). Pliki z EXIF i pliki niezbadane nie są stat-owane. |
+| `plan_moves(files, file_dates, mtime_dates, …)` | Nadal czysta; fallback czyta gotowy słownik. |
+
+Testy: `TestGetMtimeDates`, `test_mtime_fetched_only_for_files_without_exif`
+(a: data, b: `-`, c: brak wiersza → `get_mtime_dates([b])`),
+`test_no_stat_when_every_file_has_exif`. Weryfikacja liczbą syscalli `stat`
+(strace) na folderze z ~200 zdjęciami z EXIF — patrz commit.
+
+
+---
+
+## Runda 9 — ostatnie review przed merge (commit `a0ebb04`)
+
+Pełny przegląd całej gałęzi względem `main` plus piąta odpowiedź Codexa.
+
+**Uwaga Codexa (P2), trafna:** od rundy 6 lista plików idzie do exiftool przez
+stdin jako `str` z `text=True`, czyli kodowana ściśle kodowaniem locale. Ścieżka
+z bajtem spoza UTF-8 w nazwie katalogu (POSIX, `surrogateescape`, np. stary
+folder „Zdjęcia" w CP1250 na NAS) kończyła się niezłapanym `UnicodeEncodeError`
+i przerywała cały przebieg. Przekazywanie przez argv (sprzed rundy 6) używało
+`os.fsencode`, więc to regresja. Odtworzone na prawdziwym exiftool.
+
+**Dodatkowe aspekty z własnego review:**
+- to samo po stronie wyjścia: `stdout` dekodowany ściśle, więc nazwa *pliku*
+  spoza UTF-8 dawała `UnicodeDecodeError` (to istniało już na `main`);
+- Windows: `text=True` koduje stroną kodową ANSI (cp1250), więc znak spoza niej
+  wywracał przebieg; samo przejście na bajty UTF-8 bez flagi zepsułoby wszystkie
+  nie-ASCII nazwy na Windows;
+- dry-run `print()` przy zwykłym terminalu UTF-8 (`errors="strict"`) wywracał się
+  na takich ścieżkach (istniało już na `main`).
+
+| Zmiana | Szczegóły |
+|--------|-----------|
+| Subprocess exiftool w trybie bajtowym | `input=b"\n".join(os.fsencode(p) …)`, bez `text=True`; na Windows dodatkowo `-charset filename=utf8` (flaga `_IS_WINDOWS`). |
+| Parsowanie wyjścia jako bajty | Split po `b"\n"`, `rstrip(b"\r")`, nazwa przez `os.fsdecode` (ten sam str co z `scandir`), daty `decode("ascii")`. Sprawdzone: exiftool odsyła nazwy jako surowe bajty, klucze pasują. |
+| `_make_console_output_safe()` w `main()` | stdout/stderr z `errors="backslashreplace"`; nieenkodowalna nazwa drukuje się jako `\udcea` zamiast wywracać przebieg. |
+
+**Reszta gałęzi bez uwag:** przenoszenie bez nadpisywania i jego rollback,
+status EXIF per plik, obsługa przerwania, leniwy mtime, `-fast` dla CR3,
+dokumentacja. Windows niezweryfikowany (brak środowiska).
+
+
+---
+
+## Runda 10 — review Codexa commita `d131711`
+
+Poprawka kodowania przeszła bez uwag. **Nowa uwaga (P2), trafna, choć
+teoretyczna:** na systemach plików bez hardlinków (FAT/exFAT, czyli domyślnie
+karta SD) przenoszenie zajmowało nazwę placeholderem `O_EXCL`, zamykało go i
+robiło `os.replace`. Po zamknięciu deskryptora placeholder niczego nie chronił:
+plik podstawiony w tej ścieżce przez inny proces zostałby nadpisany. Okno to
+mikrosekundy i wymaga równoległego pisarza, ale łamie gwarancję „nigdy nie
+nadpisuje".
+
+Codex proponował kopiowanie do otwartego deskryptora; na karcie SD zamieniłoby
+to natychmiastowy rename w pełną kopię każdego zdjęcia. Zamiast tego:
+
+| Zmiana | Szczegóły |
+|--------|-----------|
+| `_rename_noreplace()` | Atomowy rename odmawiający nadpisania: Linux `renameat2(RENAME_NOREPLACE)` (sprawdzone w kontenerze: `EEXIST`, cel nietknięty), macOS `renamex_np(RENAME_EXCL)`, Windows `os.rename` (tam nigdy nie nadpisuje). |
+| Fallback | Gdy prymitywu brak albo FS zwraca `EINVAL`/`ENOSYS`/`ENOTSUP` → kopia z ekskluzywnym utworzeniem + usunięcie źródła z rollbackiem. |
+| Placeholder usunięty | Nie ma już okna między zajęciem nazwy a rename. |
+
+Testy: rename zachowuje inode (bez kopii), plik podstawiony tuż przed rename
+przeżywa i jest zgłaszany błąd, fallback na kopię bez prymitywu i przy `EINVAL`.
+macOS i Windows niezweryfikowane (brak środowiska).
+
+
+---
+
+## Runda 11 — review Codexa commita `e6b8fcd`
+
+**Uwaga (P2), trafna, teoretyczna:** w ścieżce `os.link` + `unlink`, gdyby
+inny proces atomowo podmienił plik źródłowy między tymi krokami (np. klient
+synchronizacji), `unlink` usunąłby ten nowy plik. Wymaga zapisu do folderu
+wejściowego pod tą samą nazwą w trakcie przebiegu.
+
+Użytkownik wybrał: poprawka i jeszcze jedna runda Codexa przed merge.
+
+| Zmiana | Szczegóły |
+|--------|-----------|
+| No-replace rename jako ścieżka podstawowa | Jedno atomowe wywołanie; brak okna między link a unlink. Szybsze niż link+unlink. |
+| `EXDEV` z rename | Kopia z ekskluzywnym utworzeniem + usunięcie źródła z rollbackiem. |
+| Link+unlink tylko awaryjnie | Tylko gdy brak no-replace rename; przed `unlink` porównanie `(st_dev, st_ino)` źródła z celem — podmienione źródło zostaje, zdjęcie jest już bezpieczne w celu (ostrzeżenie w logu, bez rollbacku). |
+
+Testy: ścieżka podstawowa nie woła `os.link`/`unlink` i zachowuje inode;
+źródło podmienione po `link` nie jest usuwane; fallback link działa normalnie.

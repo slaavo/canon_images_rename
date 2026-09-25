@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import io
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from rename_and_move_files import main, __version__
+from rename_and_move_files import ScanError, _make_console_output_safe, main, __version__
 
 
 class TestMain:
@@ -154,3 +155,33 @@ class TestMain:
 
         assert result == 0
         assert not output_dir.exists()
+
+    def test_scan_error_returns_1(self, tmp_path: Path):
+        """An unreadable input folder must not exit 0 as if it were empty."""
+        inp = tmp_path / "input"
+        inp.mkdir()
+
+        with patch.object(sys, "argv", ["prog", str(inp)]):
+            with patch("rename_and_move_files.check_exiftool", return_value=True):
+                with patch(
+                    "rename_and_move_files.process_files",
+                    side_effect=ScanError("Permission denied"),
+                ):
+                    result = main()
+
+        assert result == 1
+
+    def test_console_output_survives_non_utf8_names(self):
+        """A surrogate-escaped (non-UTF-8) name must print as an escape, not crash."""
+        raw_out = io.BytesIO()
+        raw_err = io.BytesIO()
+        out = io.TextIOWrapper(raw_out, encoding="utf-8", errors="strict")
+        err = io.TextIOWrapper(raw_err, encoding="utf-8", errors="strict")
+
+        with patch.object(sys, "stdout", out), patch.object(sys, "stderr", err):
+            _make_console_output_safe()
+            print("Zdj\udceacia/IMG.jpg")
+            sys.stdout.flush()
+
+        assert raw_out.getvalue() == b"Zdj\\udceacia/IMG.jpg\n"
+        assert err.errors == "backslashreplace"

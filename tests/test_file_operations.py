@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import errno
 import os
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from rename_and_move_files import (
+    ScanError,
     find_files,
     move_single_file,
     ensure_folders_exist,
@@ -87,15 +91,30 @@ class TestFindFiles:
         filenames = {f.name for f in files}
         assert "hidden.jpg" not in filenames
 
-    def test_nonexistent_directory_returns_empty_and_logs(self, tmp_path: Path):
-        """Nonexistent directory returns empty list and logs error."""
+    def test_unreadable_directory_raises_scan_error_and_logs(self, tmp_path: Path):
+        """A directory that cannot be read is an error, not "no photos"."""
         nonexistent = tmp_path / "does_not_exist"
 
         with patch("rename_and_move_files.log.error") as mock_error:
-            files = find_files(nonexistent)
+            with pytest.raises(ScanError):
+                find_files(nonexistent)
 
-        assert files == []
         mock_error.assert_called_once()
+
+    def test_skips_symlinks(self, tmp_path: Path):
+        """Symbolic links are not treated as photos (moving them would break relative targets)."""
+        photos = tmp_path / "photos"
+        photos.mkdir()
+        real = photos / "real.jpg"
+        real.write_text("data")
+        (photos / "link.jpg").symlink_to("real.jpg")
+
+        with patch("rename_and_move_files.log.warning") as mock_warn:
+            files = find_files(photos)
+
+        assert [f.name for f in files] == ["real.jpg"]
+        mock_warn.assert_called_once()
+        assert "1 symbolic link" in mock_warn.call_args[0][0]
 
     def test_case_insensitive_extensions(self, tmp_path: Path):
         """Extension matching should be case-insensitive."""
@@ -112,6 +131,16 @@ class TestFindFiles:
 
         files = find_files(photos)
         assert len(files) == 6
+
+    def test_returns_paths(self, tmp_path: Path):
+        """find_files returns plain Paths; no per-file metadata is gathered."""
+        photos = tmp_path / "photos"
+        photos.mkdir()
+        (photos / "a.jpg").touch()
+
+        files = find_files(photos)
+
+        assert files == [photos / "a.jpg"]
 
 
 class TestMoveSingleFile:
@@ -184,19 +213,262 @@ class TestMoveSingleFile:
         assert result.success is False
         assert result.error is not None
 
-    def test_cross_device_move_falls_back_to_shutil(self, tmp_path: Path):
-        """When os.rename fails with OSError, shutil.move should be used."""
+    def test_cross_device_move_copies_exclusively(self, tmp_path: Path):
+        """EXDEV from os.link → copy with exclusive create, then delete source."""
         source = tmp_path / "source.jpg"
         source.write_text("cross device content")
         dest = tmp_path / "dest.jpg"
 
-        with patch("rename_and_move_files.os.rename", side_effect=OSError("cross-device link")):
+        with patch(
+            "rename_and_move_files._rename_noreplace",
+            side_effect=OSError(errno.EXDEV, "Invalid cross-device link"),
+        ):
             result = move_single_file(source, dest, is_duplicate=False)
 
         assert result.success is True
         assert dest.exists()
         assert dest.read_text() == "cross device content"
         assert not source.exists()
+
+    def test_cross_device_move_refuses_existing_dest(self, tmp_path: Path):
+        """The cross-device copy must not overwrite either."""
+        source = tmp_path / "source.jpg"
+        source.write_text("new")
+        dest = tmp_path / "dest.jpg"
+        dest.write_text("precious original")
+
+        with patch(
+            "rename_and_move_files._rename_noreplace",
+            side_effect=OSError(errno.EXDEV, "Invalid cross-device link"),
+        ):
+            result = move_single_file(source, dest, is_duplicate=False)
+
+        assert result.success is False
+        assert "already exists" in result.error
+        assert dest.read_text() == "precious original"
+        assert source.exists()
+
+    def test_claim_path_when_hard_links_unsupported(self, tmp_path: Path):
+        """FAT-style EPERM from os.link → atomic no-replace rename."""
+        source = tmp_path / "source.jpg"
+        source.write_text("sd card content")
+        dest = tmp_path / "dest.jpg"
+
+        with patch(
+            "rename_and_move_files.os.link",
+            side_effect=OSError(errno.EPERM, "Operation not permitted"),
+        ):
+            result = move_single_file(source, dest, is_duplicate=False)
+
+        assert result.success is True
+        assert dest.read_text() == "sd card content"
+        assert not source.exists()
+
+    def test_claim_path_refuses_existing_dest(self, tmp_path: Path):
+        """Without hard links, an existing destination is still never replaced."""
+        source = tmp_path / "source.jpg"
+        source.write_text("new")
+        dest = tmp_path / "dest.jpg"
+        dest.write_text("precious original")
+
+        with patch(
+            "rename_and_move_files.os.link",
+            side_effect=OSError(errno.EPERM, "Operation not permitted"),
+        ):
+            result = move_single_file(source, dest, is_duplicate=False)
+
+        assert result.success is False
+        assert dest.read_text() == "precious original"
+        assert source.exists()
+
+    def test_link_rolled_back_when_source_unlink_fails(self, tmp_path: Path):
+        """os.link succeeded but the source cannot be removed: no dest left behind."""
+        source = tmp_path / "source.jpg"
+        source.write_text("content")
+        dest = tmp_path / "dest.jpg"
+        real_unlink = os.unlink
+
+        def unlink_fails_for_source(path, *args, **kwargs):
+            if Path(path) == source:
+                raise PermissionError(errno.EACCES, "Permission denied", str(path))
+            return real_unlink(path, *args, **kwargs)
+
+        with patch("rename_and_move_files._NOREPLACE_RENAME", None):
+            with patch("rename_and_move_files.os.unlink", side_effect=unlink_fails_for_source):
+                result = move_single_file(source, dest, is_duplicate=False)
+
+        assert result.success is False
+        assert "Permission denied" in result.error
+        assert not dest.exists()
+        assert source.read_text() == "content"
+
+    def test_cross_device_copy_rolled_back_when_source_unlink_fails(self, tmp_path: Path):
+        """Same guarantee on the EXDEV copy path."""
+        source = tmp_path / "source.jpg"
+        source.write_text("content")
+        dest = tmp_path / "dest.jpg"
+        real_unlink = os.unlink
+
+        def unlink_fails_for_source(path, *args, **kwargs):
+            if Path(path) == source:
+                raise PermissionError(errno.EACCES, "Permission denied", str(path))
+            return real_unlink(path, *args, **kwargs)
+
+        with patch(
+            "rename_and_move_files._rename_noreplace",
+            side_effect=OSError(errno.EXDEV, "Invalid cross-device link"),
+        ):
+            with patch("rename_and_move_files.os.unlink", side_effect=unlink_fails_for_source):
+                result = move_single_file(source, dest, is_duplicate=False)
+
+        assert result.success is False
+        assert not dest.exists()
+        assert source.read_text() == "content"
+
+    def test_no_hard_links_uses_noreplace_rename_not_copy(self, tmp_path: Path):
+        """On a no-hard-link fs the move stays a rename (same inode), not a copy."""
+        source = tmp_path / "source.jpg"
+        source.write_text("sd card content")
+        inode = source.stat().st_ino
+        dest = tmp_path / "dest.jpg"
+
+        with patch("rename_and_move_files.os.link",
+                   side_effect=OSError(errno.EPERM, "Operation not permitted")):
+            with patch("rename_and_move_files._copy_exclusive") as mock_copy:
+                result = move_single_file(source, dest, is_duplicate=False)
+
+        assert result.success is True
+        mock_copy.assert_not_called()
+        assert dest.stat().st_ino == inode
+
+    def test_file_swapped_in_during_move_is_not_overwritten(self, tmp_path: Path):
+        """A file appearing at dest right before the rename must survive (Codex P2)."""
+        source = tmp_path / "source.jpg"
+        source.write_text("new")
+        dest = tmp_path / "dest.jpg"
+        import rename_and_move_files as m
+        real = m._rename_noreplace
+
+        def racing_rename(src, dst):
+            dst.write_text("written by another process")  # the race window
+            return real(src, dst)
+
+        with patch("rename_and_move_files.os.link",
+                   side_effect=OSError(errno.EPERM, "Operation not permitted")):
+            with patch("rename_and_move_files._rename_noreplace", side_effect=racing_rename):
+                result = move_single_file(source, dest, is_duplicate=False)
+
+        assert result.success is False
+        assert "already exists" in result.error
+        assert dest.read_text() == "written by another process"
+        assert source.read_text() == "new"
+
+    def test_falls_back_to_exclusive_copy_without_noreplace_rename(self, tmp_path: Path):
+        """No renameat2/renamex_np (or fs says EINVAL) → exclusive copy, still no clobber."""
+        source = tmp_path / "source.jpg"
+        source.write_text("content")
+        dest = tmp_path / "dest.jpg"
+
+        for noreplace in (None, lambda src, dst: -1):
+            source.write_text("content")
+            if dest.exists():
+                dest.unlink()
+            with patch("rename_and_move_files.os.link",
+                       side_effect=OSError(errno.EPERM, "Operation not permitted")):
+                with patch("rename_and_move_files._NOREPLACE_RENAME", noreplace):
+                    with patch("rename_and_move_files.ctypes.get_errno", return_value=errno.EINVAL):
+                        result = move_single_file(source, dest, is_duplicate=False)
+            assert result.success is True
+            assert dest.read_text() == "content"
+            assert not source.exists()
+
+    def test_primary_path_is_a_single_rename_without_hard_link(self, tmp_path: Path):
+        """Where a no-replace rename exists, no link+unlink window is opened at all."""
+        source = tmp_path / "source.jpg"
+        source.write_text("photo")
+        inode = source.stat().st_ino
+        dest = tmp_path / "dest.jpg"
+
+        with patch("rename_and_move_files.os.link") as mock_link:
+            with patch("rename_and_move_files.os.unlink") as mock_unlink:
+                result = move_single_file(source, dest, is_duplicate=False)
+
+        assert result.success is True
+        mock_link.assert_not_called()
+        mock_unlink.assert_not_called()
+        assert dest.stat().st_ino == inode
+        assert not source.exists()
+
+    def test_link_fallback_keeps_source_replaced_after_link(self, tmp_path: Path):
+        """If source is swapped for a new file after os.link, the new file is not deleted (Codex P2)."""
+        source = tmp_path / "source.jpg"
+        source.write_text("original photo")
+        dest = tmp_path / "dest.jpg"
+        real_link = os.link
+
+        def link_then_replace_source(src, dst, *args, **kwargs):
+            real_link(src, dst, *args, **kwargs)
+            replacement = tmp_path / "incoming.tmp"
+            replacement.write_text("new photo from a sync client")
+            os.replace(replacement, src)  # atomic swap, like a sync client
+
+        with patch("rename_and_move_files._NOREPLACE_RENAME", None):
+            with patch("rename_and_move_files.os.link", side_effect=link_then_replace_source):
+                result = move_single_file(source, dest, is_duplicate=False)
+
+        assert result.success is True
+        assert dest.read_text() == "original photo"
+        assert source.read_text() == "new photo from a sync client"
+
+    def test_link_fallback_moves_normally(self, tmp_path: Path):
+        """Without a no-replace rename, link + verified unlink still moves the file."""
+        source = tmp_path / "source.jpg"
+        source.write_text("photo")
+        dest = tmp_path / "dest.jpg"
+
+        with patch("rename_and_move_files._NOREPLACE_RENAME", None):
+            result = move_single_file(source, dest, is_duplicate=False)
+
+        assert result.success is True
+        assert dest.read_text() == "photo"
+        assert not source.exists()
+
+    def test_refuses_to_overwrite_existing_destination(self, tmp_path: Path):
+        """A file created at dest after the name scan must never be clobbered."""
+        source = tmp_path / "source.jpg"
+        source.write_text("new")
+        dest = tmp_path / "dest.jpg"
+        dest.write_text("precious original")
+
+        result = move_single_file(source, dest, is_duplicate=False)
+
+        assert result.success is False
+        assert "already exists" in result.error
+        assert dest.read_text() == "precious original"
+        assert source.exists()
+
+    def test_directory_named_like_dest_is_error(self, tmp_path: Path):
+        """A directory at the destination path is a collision, not a place to move into."""
+        source = tmp_path / "source.jpg"
+        source.write_text("photo")
+        dest = tmp_path / "dest.jpg"
+        dest.mkdir()
+
+        result = move_single_file(source, dest, is_duplicate=False)
+
+        assert result.success is False
+        assert source.exists()
+        assert not (dest / "source.jpg").exists()
+
+    def test_source_not_found_leaves_no_placeholder(self, tmp_path: Path):
+        """A failed move must not leave an empty placeholder at the destination."""
+        source = tmp_path / "nonexistent.jpg"
+        dest = tmp_path / "dest.jpg"
+
+        result = move_single_file(source, dest, is_duplicate=False)
+
+        assert result.success is False
+        assert not dest.exists()
 
 
 class TestEnsureFoldersExist:
