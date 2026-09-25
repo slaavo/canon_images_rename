@@ -237,3 +237,29 @@ i przerywała cały przebieg. Przekazywanie przez argv (sprzed rundy 6) używał
 **Reszta gałęzi bez uwag:** przenoszenie bez nadpisywania i jego rollback,
 status EXIF per plik, obsługa przerwania, leniwy mtime, `-fast` dla CR3,
 dokumentacja. Windows niezweryfikowany (brak środowiska).
+
+
+---
+
+## Runda 10 — review Codexa commita `d131711`
+
+Poprawka kodowania przeszła bez uwag. **Nowa uwaga (P2), trafna, choć
+teoretyczna:** na systemach plików bez hardlinków (FAT/exFAT, czyli domyślnie
+karta SD) przenoszenie zajmowało nazwę placeholderem `O_EXCL`, zamykało go i
+robiło `os.replace`. Po zamknięciu deskryptora placeholder niczego nie chronił:
+plik podstawiony w tej ścieżce przez inny proces zostałby nadpisany. Okno to
+mikrosekundy i wymaga równoległego pisarza, ale łamie gwarancję „nigdy nie
+nadpisuje".
+
+Codex proponował kopiowanie do otwartego deskryptora; na karcie SD zamieniłoby
+to natychmiastowy rename w pełną kopię każdego zdjęcia. Zamiast tego:
+
+| Zmiana | Szczegóły |
+|--------|-----------|
+| `_rename_noreplace()` | Atomowy rename odmawiający nadpisania: Linux `renameat2(RENAME_NOREPLACE)` (sprawdzone w kontenerze: `EEXIST`, cel nietknięty), macOS `renamex_np(RENAME_EXCL)`, Windows `os.rename` (tam nigdy nie nadpisuje). |
+| Fallback | Gdy prymitywu brak albo FS zwraca `EINVAL`/`ENOSYS`/`ENOTSUP` → kopia z ekskluzywnym utworzeniem + usunięcie źródła z rollbackiem. |
+| Placeholder usunięty | Nie ma już okna między zajęciem nazwy a rename. |
+
+Testy: rename zachowuje inode (bez kopii), plik podstawiony tuż przed rename
+przeżywa i jest zgłaszany błąd, fallback na kopię bez prymitywu i przy `EINVAL`.
+macOS i Windows niezweryfikowane (brak środowiska).

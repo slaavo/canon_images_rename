@@ -74,9 +74,11 @@ function:
    both on-disk files and names already allocated this run. Runs sequentially
    before the parallel moves.
 7. `move_single_file()` via `ThreadPoolExecutor` — `_move_no_clobber()`:
-   `os.link` + `os.unlink` (atomic, fails if the destination exists), an
-   `O_EXCL` placeholder + `os.replace` on filesystems without hard links
-   (FAT/exFAT), and an exclusive-create copy for cross-device moves. A
+   `os.link` + `os.unlink` (atomic, fails if the destination exists); on
+   filesystems without hard links (FAT/exFAT) an atomic no-replace rename
+   (`_rename_noreplace`: Linux `renameat2(RENAME_NOREPLACE)`, macOS
+   `renamex_np(RENAME_EXCL)`, Windows `os.rename`); an exclusive-create copy
+   for cross-device moves or when no such rename exists. A
    destination is **never** overwritten; a late collision is reported as an
    error, and a failed move never leaves a destination behind (the link/copy
    is rolled back if the source cannot be removed). Stateless and thread-safe.
@@ -100,7 +102,9 @@ is created) and the move loop checks it to cancel not-yet-started tasks. Output 
 - `--dry-run` must stay fully side-effect-free: no folders created, no moves.
 - **Moves must never replace an existing destination.** Don't reintroduce
   `os.rename`/`shutil.move` in the move path — `os.rename` silently overwrites
-  on POSIX and `shutil.move` moves *into* a same-named directory. Collision
+  on POSIX and `shutil.move` moves *into* a same-named directory. Don't use a
+  "placeholder + `os.replace`" either: once the placeholder is closed, a file
+  swapped in at that path gets overwritten. Collision
   checks in `UniqueFilenameGenerator` count every directory entry, not just
   files, for the same reason.
 - An exiftool failure is not "no EXIF": never let a timeout or killed exiftool

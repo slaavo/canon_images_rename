@@ -249,7 +249,7 @@ class TestMoveSingleFile:
         assert source.exists()
 
     def test_claim_path_when_hard_links_unsupported(self, tmp_path: Path):
-        """FAT-style EPERM from os.link → O_EXCL placeholder + replace."""
+        """FAT-style EPERM from os.link → atomic no-replace rename."""
         source = tmp_path / "source.jpg"
         source.write_text("sd card content")
         dest = tmp_path / "dest.jpg"
@@ -323,6 +323,63 @@ class TestMoveSingleFile:
         assert result.success is False
         assert not dest.exists()
         assert source.read_text() == "content"
+
+    def test_no_hard_links_uses_noreplace_rename_not_copy(self, tmp_path: Path):
+        """On a no-hard-link fs the move stays a rename (same inode), not a copy."""
+        source = tmp_path / "source.jpg"
+        source.write_text("sd card content")
+        inode = source.stat().st_ino
+        dest = tmp_path / "dest.jpg"
+
+        with patch("rename_and_move_files.os.link",
+                   side_effect=OSError(errno.EPERM, "Operation not permitted")):
+            with patch("rename_and_move_files._copy_exclusive") as mock_copy:
+                result = move_single_file(source, dest, is_duplicate=False)
+
+        assert result.success is True
+        mock_copy.assert_not_called()
+        assert dest.stat().st_ino == inode
+
+    def test_file_swapped_in_during_move_is_not_overwritten(self, tmp_path: Path):
+        """A file appearing at dest right before the rename must survive (Codex P2)."""
+        source = tmp_path / "source.jpg"
+        source.write_text("new")
+        dest = tmp_path / "dest.jpg"
+        import rename_and_move_files as m
+        real = m._rename_noreplace
+
+        def racing_rename(src, dst):
+            dst.write_text("written by another process")  # the race window
+            return real(src, dst)
+
+        with patch("rename_and_move_files.os.link",
+                   side_effect=OSError(errno.EPERM, "Operation not permitted")):
+            with patch("rename_and_move_files._rename_noreplace", side_effect=racing_rename):
+                result = move_single_file(source, dest, is_duplicate=False)
+
+        assert result.success is False
+        assert "already exists" in result.error
+        assert dest.read_text() == "written by another process"
+        assert source.read_text() == "new"
+
+    def test_falls_back_to_exclusive_copy_without_noreplace_rename(self, tmp_path: Path):
+        """No renameat2/renamex_np (or fs says EINVAL) → exclusive copy, still no clobber."""
+        source = tmp_path / "source.jpg"
+        source.write_text("content")
+        dest = tmp_path / "dest.jpg"
+
+        for noreplace in (None, lambda src, dst: -1):
+            source.write_text("content")
+            if dest.exists():
+                dest.unlink()
+            with patch("rename_and_move_files.os.link",
+                       side_effect=OSError(errno.EPERM, "Operation not permitted")):
+                with patch("rename_and_move_files._NOREPLACE_RENAME", noreplace):
+                    with patch("rename_and_move_files.ctypes.get_errno", return_value=errno.EINVAL):
+                        result = move_single_file(source, dest, is_duplicate=False)
+            assert result.success is True
+            assert dest.read_text() == "content"
+            assert not source.exists()
 
     def test_refuses_to_overwrite_existing_destination(self, tmp_path: Path):
         """A file created at dest after the name scan must never be clobbered."""

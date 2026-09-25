@@ -71,6 +71,7 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import copy
+import ctypes
 import errno
 import logging
 import os
@@ -609,15 +610,67 @@ def _unlink_source_or_rollback(source: Path, dest: Path) -> None:
         raise
 
 
+def _load_noreplace_rename() -> Callable[[bytes, bytes], int] | None:
+    """
+    Return libc's atomic "rename unless the target exists" as f(src, dst),
+    or None if this platform has none. Linux: renameat2(RENAME_NOREPLACE),
+    glibc >= 2.28. macOS: renamex_np(RENAME_EXCL). Both fail with EEXIST
+    instead of replacing the target.
+    """
+    if _IS_WINDOWS:
+        return None  # os.rename already refuses to replace on Windows
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+    except OSError:
+        return None
+    renameat2 = getattr(libc, "renameat2", None)
+    if renameat2 is not None:
+        at_fdcwd, rename_noreplace = -100, 1
+        return lambda src, dst: renameat2(at_fdcwd, src, at_fdcwd, dst, rename_noreplace)
+    renamex_np = getattr(libc, "renamex_np", None)
+    if renamex_np is not None:
+        rename_excl = 0x4
+        return lambda src, dst: renamex_np(src, dst, rename_excl)
+    return None
+
+
+_NOREPLACE_RENAME = _load_noreplace_rename()
+
+# errno values meaning "this filesystem/kernel lacks the no-replace rename",
+# as opposed to a real failure of the rename itself.
+_NOREPLACE_UNSUPPORTED = {errno.EINVAL, errno.ENOSYS, errno.ENOTSUP, errno.EOPNOTSUPP}
+
+
+def _rename_noreplace(source: Path, dest: Path) -> bool:
+    """
+    Atomically rename source to dest, raising FileExistsError if dest exists.
+
+    Returns False (and does nothing) if no such primitive is available here,
+    so the caller can fall back to an exclusive-create copy.
+    """
+    if _IS_WINDOWS:
+        os.rename(source, dest)  # MoveFileEx without REPLACE_EXISTING
+        return True
+    if _NOREPLACE_RENAME is None:
+        return False
+    if _NOREPLACE_RENAME(os.fsencode(source), os.fsencode(dest)) == 0:
+        return True
+    err = ctypes.get_errno()
+    if err in _NOREPLACE_UNSUPPORTED:
+        return False
+    raise OSError(err, os.strerror(err), str(source), None, str(dest))
+
+
 def _move_no_clobber(source: Path, dest: Path) -> None:
     """
     Move source to dest without ever replacing an existing dest.
 
     os.rename() silently overwrites on POSIX, so the name is claimed
     atomically first: os.link() fails with FileExistsError if dest exists.
-    Filesystems without hard links (FAT/exFAT SD cards) get an O_EXCL
-    placeholder that our own rename then replaces; cross-device moves use an
-    exclusive-create copy. A failed move never leaves dest behind.
+    Filesystems without hard links (FAT/exFAT SD cards) use an atomic
+    no-replace rename (see _rename_noreplace), and cross-device moves or
+    platforms without that primitive use an exclusive-create copy. A failed
+    move never leaves dest behind.
     """
     try:
         os.link(source, dest)
@@ -628,16 +681,14 @@ def _move_no_clobber(source: Path, dest: Path) -> None:
             _copy_exclusive(source, dest)
             _unlink_source_or_rollback(source, dest)
             return
-        # No hard-link support: claim the name, then replace our placeholder.
-        # os.replace (not os.rename) so this also works on Windows; it is
-        # atomic, so there is nothing to roll back on failure but the claim.
-        fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
-        os.close(fd)
-        try:
-            os.replace(source, dest)
-        except OSError:
-            _remove_quietly(dest)
-            raise
+        # No hard-link support (FAT/exFAT): an atomic no-replace rename keeps
+        # the instant same-device move. A placeholder + os.replace would not
+        # be safe: once the placeholder's descriptor is closed, anything
+        # swapped in at that path would be silently overwritten.
+        if _rename_noreplace(source, dest):
+            return
+        _copy_exclusive(source, dest)
+        _unlink_source_or_rollback(source, dest)
         return
     _unlink_source_or_rollback(source, dest)
 
