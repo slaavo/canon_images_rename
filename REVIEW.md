@@ -263,3 +263,24 @@ to natychmiastowy rename w pełną kopię każdego zdjęcia. Zamiast tego:
 Testy: rename zachowuje inode (bez kopii), plik podstawiony tuż przed rename
 przeżywa i jest zgłaszany błąd, fallback na kopię bez prymitywu i przy `EINVAL`.
 macOS i Windows niezweryfikowane (brak środowiska).
+
+
+---
+
+## Runda 11 — review Codexa commita `e6b8fcd`
+
+**Uwaga (P2), trafna, teoretyczna:** w ścieżce `os.link` + `unlink`, gdyby
+inny proces atomowo podmienił plik źródłowy między tymi krokami (np. klient
+synchronizacji), `unlink` usunąłby ten nowy plik. Wymaga zapisu do folderu
+wejściowego pod tą samą nazwą w trakcie przebiegu.
+
+Użytkownik wybrał: poprawka i jeszcze jedna runda Codexa przed merge.
+
+| Zmiana | Szczegóły |
+|--------|-----------|
+| No-replace rename jako ścieżka podstawowa | Jedno atomowe wywołanie; brak okna między link a unlink. Szybsze niż link+unlink. |
+| `EXDEV` z rename | Kopia z ekskluzywnym utworzeniem + usunięcie źródła z rollbackiem. |
+| Link+unlink tylko awaryjnie | Tylko gdy brak no-replace rename; przed `unlink` porównanie `(st_dev, st_ino)` źródła z celem — podmienione źródło zostaje, zdjęcie jest już bezpieczne w celu (ostrzeżenie w logu, bez rollbacku). |
+
+Testy: ścieżka podstawowa nie woła `os.link`/`unlink` i zachowuje inode;
+źródło podmienione po `link` nie jest usuwane; fallback link działa normalnie.

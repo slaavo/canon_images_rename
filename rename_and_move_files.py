@@ -665,30 +665,58 @@ def _move_no_clobber(source: Path, dest: Path) -> None:
     """
     Move source to dest without ever replacing an existing dest.
 
-    os.rename() silently overwrites on POSIX, so the name is claimed
-    atomically first: os.link() fails with FileExistsError if dest exists.
-    Filesystems without hard links (FAT/exFAT SD cards) use an atomic
-    no-replace rename (see _rename_noreplace), and cross-device moves or
-    platforms without that primitive use an exclusive-create copy. A failed
-    move never leaves dest behind.
+    Primary path: one atomic no-replace rename (see _rename_noreplace), which
+    fails with FileExistsError if dest exists and never touches any other
+    file. Cross-device moves use an exclusive-create copy plus source removal.
+    Only where no such rename exists does it fall back to os.link + unlink,
+    verifying that the source name still refers to the linked file before
+    unlinking it. A failed move never leaves dest behind.
     """
+    try:
+        if _rename_noreplace(source, dest):
+            return
+    except FileExistsError:
+        raise
+    except OSError as e:
+        if e.errno != errno.EXDEV:
+            raise
+        _copy_exclusive(source, dest)
+        _unlink_source_or_rollback(source, dest)
+        return
+
+    # No no-replace rename on this platform/filesystem. os.rename() would
+    # silently overwrite on POSIX, so claim the name with a hard link, which
+    # fails with FileExistsError if dest exists.
     try:
         os.link(source, dest)
     except FileExistsError:
         raise
-    except OSError as e:
-        if e.errno == errno.EXDEV:
-            _copy_exclusive(source, dest)
-            _unlink_source_or_rollback(source, dest)
-            return
-        # No hard-link support (FAT/exFAT): an atomic no-replace rename keeps
-        # the instant same-device move. A placeholder + os.replace would not
-        # be safe: once the placeholder's descriptor is closed, anything
-        # swapped in at that path would be silently overwritten.
-        if _rename_noreplace(source, dest):
-            return
+    except OSError:
+        # Cross-device or no hard-link support: exclusive-create copy.
         _copy_exclusive(source, dest)
         _unlink_source_or_rollback(source, dest)
+        return
+    _unlink_linked_source(source, dest)
+
+
+def _unlink_linked_source(source: Path, dest: Path) -> None:
+    """
+    Remove source after os.link(source, dest), unless the source name no
+    longer refers to the linked file (replaced by another process in the
+    meantime). Then the photo is already safe at dest and the new file at
+    source is left alone for a later run.
+    """
+    try:
+        linked = os.stat(dest)
+        current = os.stat(source)
+    except OSError:
+        _remove_quietly(dest)
+        raise
+    if (current.st_dev, current.st_ino) != (linked.st_dev, linked.st_ino):
+        log.warning(
+            f"{source.name} was replaced during the move; "
+            f"the original is at {dest.name}, the new file was left in place"
+        )
         return
     _unlink_source_or_rollback(source, dest)
 
