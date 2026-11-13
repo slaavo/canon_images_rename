@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import errno
 import os
 from pathlib import Path
@@ -18,6 +19,20 @@ from rename_and_move_files import (
     JPEG_EXTENSIONS,
     ALL_EXTENSIONS,
 )
+from tests.conftest import make_file_symlink_or_skip
+
+
+def _without_noreplace_rename(noreplace=None):
+    """
+    Force the POSIX move path with `noreplace` standing in for
+    renameat2/renamex_np (None = no such primitive). On Windows
+    _rename_noreplace() always uses os.rename, so _IS_WINDOWS must be cleared
+    too, or the fallback under test would never be reached there.
+    """
+    stack = contextlib.ExitStack()
+    stack.enter_context(patch("rename_and_move_files._IS_WINDOWS", False))
+    stack.enter_context(patch("rename_and_move_files._NOREPLACE_RENAME", noreplace))
+    return stack
 
 
 class TestFindFiles:
@@ -107,10 +122,40 @@ class TestFindFiles:
         photos.mkdir()
         real = photos / "real.jpg"
         real.write_text("data")
-        (photos / "link.jpg").symlink_to("real.jpg")
+        make_file_symlink_or_skip(photos / "link.jpg", "real.jpg")
 
         with patch("rename_and_move_files.log.warning") as mock_warn:
             files = find_files(photos)
+
+        assert [f.name for f in files] == ["real.jpg"]
+        mock_warn.assert_called_once()
+        assert "1 symbolic link" in mock_warn.call_args[0][0]
+
+    def test_skips_symlink_entries_without_real_links(self, tmp_path: Path):
+        """Same rule via fake scandir entries, so it runs where symlinks can't be made."""
+
+        class FakeEntry:
+            def __init__(self, name, *, link=False, file=True):
+                self.name = name
+                self.path = str(tmp_path / name)
+                self._link, self._file = link, file
+
+            def is_symlink(self):
+                return self._link
+
+            def is_file(self):
+                return self._file
+
+        entries = [
+            FakeEntry("real.jpg"),
+            FakeEntry("link.jpg", link=True),
+            FakeEntry("folder.jpg", file=False),
+        ]
+
+        with patch("rename_and_move_files.os.scandir",
+                   return_value=contextlib.nullcontext(entries)):
+            with patch("rename_and_move_files.log.warning") as mock_warn:
+                files = find_files(tmp_path)
 
         assert [f.name for f in files] == ["real.jpg"]
         mock_warn.assert_called_once()
@@ -293,7 +338,7 @@ class TestMoveSingleFile:
                 raise PermissionError(errno.EACCES, "Permission denied", str(path))
             return real_unlink(path, *args, **kwargs)
 
-        with patch("rename_and_move_files._NOREPLACE_RENAME", None):
+        with _without_noreplace_rename():
             with patch("rename_and_move_files.os.unlink", side_effect=unlink_fails_for_source):
                 result = move_single_file(source, dest, is_duplicate=False)
 
@@ -375,7 +420,7 @@ class TestMoveSingleFile:
                 dest.unlink()
             with patch("rename_and_move_files.os.link",
                        side_effect=OSError(errno.EPERM, "Operation not permitted")):
-                with patch("rename_and_move_files._NOREPLACE_RENAME", noreplace):
+                with _without_noreplace_rename(noreplace):
                     with patch("rename_and_move_files.ctypes.get_errno", return_value=errno.EINVAL):
                         result = move_single_file(source, dest, is_duplicate=False)
             assert result.success is True
@@ -412,7 +457,7 @@ class TestMoveSingleFile:
             replacement.write_text("new photo from a sync client")
             os.replace(replacement, src)  # atomic swap, like a sync client
 
-        with patch("rename_and_move_files._NOREPLACE_RENAME", None):
+        with _without_noreplace_rename():
             with patch("rename_and_move_files.os.link", side_effect=link_then_replace_source):
                 result = move_single_file(source, dest, is_duplicate=False)
 
@@ -426,7 +471,7 @@ class TestMoveSingleFile:
         source.write_text("photo")
         dest = tmp_path / "dest.jpg"
 
-        with patch("rename_and_move_files._NOREPLACE_RENAME", None):
+        with _without_noreplace_rename():
             result = move_single_file(source, dest, is_duplicate=False)
 
         assert result.success is True

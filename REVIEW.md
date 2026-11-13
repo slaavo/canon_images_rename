@@ -376,3 +376,25 @@ ustawiony na 2025-01-01, `--dry-run`): przed poprawką `locked.jpg` →
 `2025_01_01/!orig/…` i 0 błędów; po poprawce błąd „could not be read”, plik
 na miejscu, `good.jpg` bez zmian. Folder testowy 784 CR3 + 784 JPG: czasy bez
 zmian (7,5 s / 2,2 s), plany identyczne z `main`.
+
+
+---
+
+## Runda 13 — testy zielone także na Windows
+
+Do tej pory 7 testów padało na Windows (na Linux przechodziły). Przyczyny
+leżały w testach, nie w kodzie:
+
+| Test | Przyczyna | Poprawka |
+|------|-----------|----------|
+| `test_paths_are_passed_on_stdin` | Oczekiwane `/fake/a.jpg`; `str(Path)` na Windows daje `\fake\a.jpg` | Oczekiwanie budowane z `os.fsencode(str(f))` |
+| `test_windows_adds_utf8_filename_charset` | Wywołanie „POSIX” nie łatało `_IS_WINDOWS`, więc na Windows dostawało `-charset` | Jawne `_IS_WINDOWS = False` |
+| `test_console_output_survives_non_utf8_names` | `TextIOWrapper` tłumaczy `\n` → `\r\n` na Windows | `newline="\n"` w teście (test dotyczy obsługi błędów, nie końców linii) |
+| `test_link_rolled_back_when_source_unlink_fails`, `test_link_fallback_keeps_source_replaced_after_link` | Na Windows `_rename_noreplace()` zawsze robi `os.rename` i ignoruje `_NOREPLACE_RENAME`, więc ścieżka link+unlink nie była osiągana | Helper `_without_noreplace_rename()` łata też `_IS_WINDOWS`. Dotyczyło to również `test_link_fallback_moves_normally` i `test_falls_back_to_exclusive_copy_without_noreplace_rename` — na Windows przechodziły, ale testowały `os.rename` zamiast fallbacku. Teraz naprawdę ćwiczą link+unlink (hardlinki NTFS, `st_ino`) i kopię. |
+| `test_symlink_resolution` | Symlink wymaga trybu dewelopera / admina (WinError 1314) | `make_dir_link()`: symlink, a bez uprawnień junction (`_winapi.CreateJunction`), który `resolve()` też rozwiązuje |
+| `test_skips_symlinks` | j.w., a junction działa tylko dla katalogów | `make_file_symlink_or_skip()` — pomija tylko przy braku uprawnień; nowy `test_skips_symlink_entries_without_real_links` sprawdza tę samą logikę na atrapie `os.scandir` wszędzie |
+
+Wynik na Windows 11 / Python 3.14: **181 passed, 3 skipped, 0 failed**
+(pominięte: 2 testy nazw spoza UTF-8 — na Windows nie istnieją; symlink do
+pliku bez uprawnień). Linux nieuruchomiony lokalnie (WSL bez Virtual Machine
+Platform) — zmiany ustawiają w testach wartości domyślne dla POSIX.

@@ -2,9 +2,43 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
+
+
+# WinError 1314: creating symlinks needs Developer Mode or admin rights
+_ERROR_PRIVILEGE_NOT_HELD = 1314
+
+
+def _symlink_not_permitted(error: OSError) -> bool:
+    return os.name == "nt" and getattr(error, "winerror", None) == _ERROR_PRIVILEGE_NOT_HELD
+
+
+def make_file_symlink_or_skip(link: Path, target: str | Path) -> None:
+    """Create a file symlink, or skip the test where the OS does not allow it."""
+    try:
+        link.symlink_to(target)
+    except OSError as e:
+        if _symlink_not_permitted(e):
+            pytest.skip("creating symlinks needs Developer Mode or admin rights on Windows")
+        raise
+
+
+def make_dir_link(link: Path, target: Path) -> None:
+    """
+    Create a directory link to `target`: a symlink, or on Windows without the
+    symlink privilege a junction (needs no privilege; resolve() follows both).
+    """
+    try:
+        link.symlink_to(target, target_is_directory=True)
+    except OSError as e:
+        if not _symlink_not_permitted(e):
+            raise
+        import _winapi  # Windows-only stdlib module
+
+        _winapi.CreateJunction(str(target), str(link))
 
 
 # Sample exiftool tab-separated outputs (reusable test data)

@@ -175,8 +175,10 @@ class TestMain:
         """A surrogate-escaped (non-UTF-8) name must print as an escape, not crash."""
         raw_out = io.BytesIO()
         raw_err = io.BytesIO()
-        out = io.TextIOWrapper(raw_out, encoding="utf-8", errors="strict")
-        err = io.TextIOWrapper(raw_err, encoding="utf-8", errors="strict")
+        # newline="\n": no "\n" -> "\r\n" translation on Windows; this test
+        # is about the error handler, not line endings.
+        out = io.TextIOWrapper(raw_out, encoding="utf-8", errors="strict", newline="\n")
+        err = io.TextIOWrapper(raw_err, encoding="utf-8", errors="strict", newline="\n")
 
         with patch.object(sys, "stdout", out), patch.object(sys, "stderr", err):
             _make_console_output_safe()
