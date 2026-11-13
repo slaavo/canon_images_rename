@@ -625,7 +625,8 @@ class TestRunExiftoolBatch:
         argv = mock_run.call_args[0][0]
         assert argv[-2:] == ["-@", "-"]
         assert not any(str(f) in argv for f in files)
-        assert mock_run.call_args[1]["input"] == b"/fake/a.jpg\n/fake/b.jpg"
+        # str(Path) uses the native separator ("\" on Windows)
+        assert mock_run.call_args[1]["input"] == b"\n".join(os.fsencode(str(f)) for f in files)
         # bytes mode: the locale encoding must never touch the paths
         assert "text" not in mock_run.call_args[1]
 
@@ -678,7 +679,8 @@ class TestRunExiftoolBatch:
         mock_result.stderr = b""
 
         with patch("rename_and_move_files.subprocess.run", return_value=mock_result) as mock_run:
-            _run_exiftool_batch([Path("/fake/a.jpg")], "-fast2")
+            with patch("rename_and_move_files._IS_WINDOWS", False):
+                _run_exiftool_batch([Path("/fake/a.jpg")], "-fast2")
         posix_argv = mock_run.call_args[0][0]
 
         with patch("rename_and_move_files.subprocess.run", return_value=mock_result) as mock_run:

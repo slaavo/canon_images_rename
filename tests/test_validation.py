@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from rename_and_move_files import validate_date, validate_paths
+from tests.conftest import make_dir_link
 
 
 class TestValidateDate:
@@ -103,7 +104,7 @@ class TestValidatePaths:
         real_dir.mkdir()
 
         link_dir = tmp_path / "link"
-        link_dir.symlink_to(real_dir)
+        make_dir_link(link_dir, real_dir)  # junction on unprivileged Windows
 
         # Same physical location via symlink
         assert validate_paths(real_dir, link_dir) is True

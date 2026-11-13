@@ -138,6 +138,13 @@ is created) and the move loop checks it to cancel not-yet-started tasks. Output 
   `moov` sits after the media data loses its date and gets silently filed by
   mtime. `QUICKTIME_EXTENSIONS` keeps those on `-fast`; `-fast2` is only safe
   for JPEG and TIFF-based RAW.
-- No linter is configured; the bar is a green `pytest` run.
+- No linter is configured; the bar is a green `pytest` run — on Linux **and**
+  Windows. Tests must not assume `/` in `str(Path)`, `\n` from a default
+  `TextIOWrapper`, or that symlinks can be created (use the helpers in
+  `tests/conftest.py`: `make_dir_link()` falls back to a junction,
+  `make_file_symlink_or_skip()` skips without the privilege). On Windows
+  `_rename_noreplace()` always uses `os.rename` and ignores
+  `_NOREPLACE_RENAME`; tests of the copy/link fallback must force the POSIX
+  path with `_without_noreplace_rename()` or they silently test `os.rename`.
 - `REVIEW.md` is a running log of review rounds — append a new section rather
   than rewriting past ones.
