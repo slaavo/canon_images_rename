@@ -284,3 +284,62 @@ Użytkownik wybrał: poprawka i jeszcze jedna runda Codexa przed merge.
 
 Testy: ścieżka podstawowa nie woła `os.link`/`unlink` i zachowuje inode;
 źródło podmienione po `link` nie jest usuwane; fallback link działa normalnie.
+
+
+---
+
+## Runda 12 — równoległość exiftool dla zwykłych folderów (zamiast portu na Go)
+
+**Pytanie:** czy przepisać skrypt na Go dla wydajności? **Pomiar** na
+prawdziwym folderze (784 × CR3 + 784 × JPG, lokalny NVMe, 16 wątków CPU,
+Windows 11) pokazał, że Python to <1% czasu; ~99% to exiftool (Perl), który
+parsuje CR3 ~46 ms/plik — czysto CPU. Port na Go z tym samym exiftool dałby te
+same liczby, więc odrzucony.
+
+**Prawdziwy problem:** przy `EXIFTOOL_BATCH_SIZE = 5000` folder <5000 plików
+szedł jednym procesem — `EXIFTOOL_MAX_PARALLEL` nigdy się nie włączał.
+
+| exiftool na 784 × CR3 | czas |
+|---|---|
+| 1 proces (stan przed) | 36,2 s |
+| 4 procesy | 10,1 s |
+| 8 procesów | 6,3 s |
+| 12 procesów | 6,1 s |
+
+| Zmiana | Szczegóły |
+|--------|-----------|
+| `_exiftool_batch_size()` | Grupa dzielona na `EXIFTOOL_MAX_PARALLEL` procesów, celując w min `EXIFTOOL_MIN_BATCH_SIZE = 50` plików na proces (start exiftool ~0,5 s na Windows) i max `EXIFTOOL_BATCH_SIZE`; partie wyrównane co do jednego pliku. |
+| `EXIFTOOL_MAX_PARALLEL` | `min(8, os.cpu_count())` zamiast stałego 4. |
+| `EXIFTOOL_BATCH_SIZE` | 5000 → 2000: 5000 CR3 × 46 ms ≈ 230 s było blisko `EXIFTOOL_TIMEOUT = 300`; 2000 ≈ 90 s. |
+| Kolejność | Partie CR3 (`-fast`, najwolniejsze) startują pierwsze. |
+
+**Wynik end-to-end (`--dry-run`):** CR3 37–41 s → **7,4–8 s**, JPG 7 s → **2,2 s**;
+plan przeniesień identyczny ze starą wersją.
+
+Testy: podział zwykłego folderu na 8 procesów, brak podziału ≤ min, min i max
+rozmiar partii, każdy plik dokładnie raz, CR3 pierwsze, limit współbieżności,
+propagacja `ExifToolError` z równoległej partii.
+
+Uwaga: na Windows 7 testów pada niezależnie od tej zmiany (symlinki bez
+uprawnień, `\r\n` w stdin exiftool, nazwy nie-UTF-8) — tak samo przed nią.
+
+### Review wieloagentowe tej zmiany — 1 potwierdzona uwaga (średnia)
+
+**Regresja:** podział na sztywne kawałki dawał jednoplikowe ogony (51 → 50 + 1).
+Partia złożona wyłącznie z plików nie do otwarcia (zniknął po skanie,
+zablokowany, brak uprawnień) kończy exiftool kodem 1 bez stdout → `ExifToolError`
+→ przerwanie **całego** przebiegu. Wcześniej taki plik dzielił partię z innymi i
+był tylko zgłaszany jako nieczytelny. Potwierdzone na prawdziwym exiftool 12.64.
+
+| Poprawka | Szczegóły |
+|----------|-----------|
+| Partie wyrównane | 51 → 26 + 25, 101 → 51 + 50; różnica rozmiarów ≤ 1 plik. |
+| `_all_open_errors()` | Kod 1 + puste stdout + stderr zawierające **wyłącznie** `Error: File not found` / `Error opening file` dla **dokładnie** plików partii → pusty wynik (pliki zgłoszone jako nieczytelne, bez mtime). Każda inna linia stderr, inny kod wyjścia, niepełna lista plików, timeout, sygnał → nadal `ExifToolError`. Na Windows exiftool odsyła ścieżki z `/` — porównanie normalizuje separator tylko tam (na POSIX `\` to zwykły znak nazwy). |
+
+Odrzucone przy weryfikacji: sformułowanie „never fewer than” w CLAUDE.md
+(poprawione mimo to) i nieaktualny komentarz „parallel for large folders”
+w `process_files()` (poprawiony).
+
+Weryfikacja z prawdziwym exiftool: partia samych brakujących plików → `{}`;
+25 dobrych + 26 brakujących (druga partia w całości brakująca) → 25 dat, bez
+przerwania. Plany przeniesień na folderze testowym nadal identyczne.
