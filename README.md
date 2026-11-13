@@ -86,7 +86,7 @@ With `-r`, RAW files also go to `!orig/`.
 ## How it works
 
 1. **Scan** — `os.scandir()` finds files with supported extensions
-2. **EXIF** — Batched `exiftool` calls read dates for all files at once
+2. **EXIF** — Batched `exiftool` calls read dates for all files at once, split across up to 8 parallel exiftool processes (exiftool itself is single-threaded)
 3. **Fallback** — No EXIF data? Uses the file modification date instead. If neither is available, the file is skipped with a warning
 4. **Conflicts** — Duplicate filenames get a `_2`, `_3`, etc. suffix
 5. **Move** — `ThreadPoolExecutor` moves files in parallel

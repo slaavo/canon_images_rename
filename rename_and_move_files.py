@@ -106,12 +106,21 @@ DATE_PATTERN = re.compile(r"^\d{4}_\d{2}_\d{2}_\d{6}$")
 EXIFTOOL_TIMEOUT = 300
 
 # Max number of files per single exiftool invocation. File lists are passed
-# on stdin (-@ -), so this is not an ARG_MAX guard; it bounds the work (and
-# the timeout window) of one exiftool process and enables parallel batches.
-EXIFTOOL_BATCH_SIZE = 5000
+# on stdin (-@ -), so this is not an ARG_MAX guard; it bounds the work of one
+# exiftool process so it stays well inside EXIFTOOL_TIMEOUT (exiftool parses
+# a CR3 in ~46 ms, so 2000 of them take ~90 s on a fast desktop CPU).
+EXIFTOOL_BATCH_SIZE = 2000
 
-# Max concurrent exiftool processes when more than one batch is needed
-EXIFTOOL_MAX_PARALLEL = 4
+# Min number of files per exiftool invocation when a group is split across
+# processes: starting exiftool costs ~0.5 s on Windows (~0.1-0.2 s on POSIX),
+# so tiny batches would spend more time starting Perl than reading files.
+EXIFTOOL_MIN_BATCH_SIZE = 50
+
+# Max concurrent exiftool processes. Exiftool is single-threaded and CPU-bound
+# (measured on 784 CR3 files from NVMe: 1 process 36 s, 4 processes 10 s,
+# 8 processes 6.3 s, 12 processes 6.1 s), so a folder is split across up to
+# this many processes, never more than there are CPUs.
+EXIFTOOL_MAX_PARALLEL = min(8, os.cpu_count() or 1)
 
 # Windows needs exiftool told that arg-file names are UTF-8 (see
 # _run_exiftool_batch); a module flag so tests can exercise both paths.
@@ -241,6 +250,37 @@ def validate_date(date_str: str | None) -> str | None:
     return date_str
 
 
+# exiftool's Error tag for a file that exists but could not be opened
+_EXIFTOOL_OPEN_ERROR_TAG = b"Error opening file"
+
+# exiftool's per-file messages for a file it could not open at all
+_EXIFTOOL_OPEN_ERROR = re.compile(rb"^Error: (?:File not found|Error opening file) - (.+)$")
+
+
+def _all_open_errors(stderr: bytes, paths: list[str]) -> bool:
+    """
+    True if stderr consists solely of "could not open" errors, exactly one
+    for each of `paths` — i.e. exiftool inspected none of them. Any other
+    line, or a mismatch in the named files, means something else went wrong.
+    """
+    named: list[str] = []
+    for raw in stderr.split(b"\n"):
+        line = raw.rstrip(b"\r")
+        if not line.strip():
+            continue
+        match = _EXIFTOOL_OPEN_ERROR.match(line)
+        if match is None:
+            return False
+        named.append(os.fsdecode(match.group(1)))
+    expected = list(paths)
+    if _IS_WINDOWS:
+        # exiftool echoes Windows paths with "/" separators; on POSIX a
+        # backslash is an ordinary file-name character, so leave it alone.
+        named = [p.replace("\\", "/") for p in named]
+        expected = [p.replace("\\", "/") for p in expected]
+    return bool(expected) and sorted(named) == sorted(expected)
+
+
 def _run_exiftool_batch(batch: list[Path], fast_flag: str) -> dict[str, str | None]:
     """
     Run exiftool on a single batch of files.
@@ -251,13 +291,17 @@ def _run_exiftool_batch(batch: list[Path], fast_flag: str) -> dict[str, str | No
 
     Returns a dict with one entry per file exiftool could open: filename ->
     formatted date string, or None when the file has no date tag. Files
-    exiftool could not open at all (missing, permission denied) produce no
-    output row and are therefore absent — the caller must treat "absent" as
-    "not inspected", never as "no EXIF".
+    exiftool could not find (e.g. vanished after the scan) produce no output
+    row; files it found but could not open (permission denied) produce a row
+    whose Error tag is "Error opening file", which is skipped. Both are
+    therefore absent — the caller must treat "absent" as "not inspected",
+    never as "no EXIF".
 
     Raises ExifToolError if exiftool timed out, was killed by a signal, or
-    exited non-zero without producing any output. A non-zero exit *with*
-    output is exiftool's normal "some files had errors" and is only logged.
+    exited non-zero without producing any output — except when its stderr
+    shows that it simply could not open any file of the batch, which returns
+    an empty dict (all absent). A non-zero exit *with* output is exiftool's
+    normal "some files had errors" and is only logged.
     """
     results: dict[str, str | None] = {}
 
@@ -290,7 +334,7 @@ def _run_exiftool_batch(batch: list[Path], fast_flag: str) -> dict[str, str | No
                 "exiftool", "-T", fast_flag,
                 "-d", "%Y_%m_%d_%H%M%S",
                 *charset_args,
-                "-filename", "-DateTimeOriginal", "-CreateDate",
+                "-filename", "-DateTimeOriginal", "-CreateDate", "-Error",
                 "-@", "-",
             ],
             input=b"\n".join(os.fsencode(p) for p in paths),
@@ -311,6 +355,15 @@ def _run_exiftool_batch(batch: list[Path], fast_flag: str) -> dict[str, str | No
 
     has_output = bool(result.stdout.strip())
 
+    # Every file in the batch is gone (e.g. vanished after the scan): exiftool
+    # exits 1 with no output. That is the per-file "unreadable" case
+    # of a mixed batch, not an exiftool failure — return no entries so the
+    # caller reports these files as unreadable. Anything less specific stays
+    # fatal below.
+    if result.returncode == 1 and not has_output and _all_open_errors(result.stderr, paths):
+        log.warning(f"exiftool could not open any of the {len(paths)} files in this batch")
+        return results
+
     # Negative code = killed by a signal (a Ctrl+C reaches the child too);
     # non-zero with no output at all = total failure. Either way the dates are
     # unknown, not absent, so the caller must not fall back to mtime.
@@ -325,7 +378,8 @@ def _run_exiftool_batch(batch: list[Path], fast_flag: str) -> dict[str, str | No
             f"(batch of {len(paths)} files) — some files may be unreadable"
         )
 
-    # Parse tab-separated output: filename \t DateTimeOriginal \t CreateDate.
+    # Parse tab-separated output:
+    #   filename \t DateTimeOriginal \t CreateDate \t Error
     # Split on b"\n" and strip "\r" (Windows line ends); str.splitlines() would
     # also split names containing U+2028/U+0085. exiftool echoes file names as
     # raw bytes, and os.fsdecode() turns them into exactly the str that
@@ -349,6 +403,16 @@ def _run_exiftool_batch(batch: list[Path], fast_flag: str) -> dict[str, str | No
             if len(parts) >= 3 else None
         )
 
+        # A file that exists but cannot be opened (permission denied, locked)
+        # still gets a row, with empty dates and Error = "Error opening file".
+        # exiftool never inspected it, so it must stay absent (reported as
+        # unreadable), not become None (which would mean "no date tag" and
+        # file it by mtime).
+        error = parts[3].strip() if len(parts) >= 4 else b""
+        if error == _EXIFTOOL_OPEN_ERROR_TAG:
+            log.warning(f"exiftool could not open {filename!r} (no read access?)")
+            continue
+
         # Prefer DateTimeOriginal, fall back to CreateDate. A row with no
         # date still gets an entry (None): exiftool inspected the file.
         results[filename] = date_original or date_create
@@ -363,15 +427,29 @@ def _exiftool_fast_flag(file: Path) -> str:
     return "-fast2"
 
 
+def _exiftool_batch_size(count: int) -> int:
+    """
+    Files per exiftool invocation for a group of `count` files.
+
+    Spreads the group evenly over EXIFTOOL_MAX_PARALLEL processes, but
+    never below EXIFTOOL_MIN_BATCH_SIZE (process start-up would dominate)
+    nor above EXIFTOOL_BATCH_SIZE (bounds one process's work and timeout).
+    """
+    per_process = -(-count // EXIFTOOL_MAX_PARALLEL)  # ceiling division
+    return max(1, min(EXIFTOOL_BATCH_SIZE, max(EXIFTOOL_MIN_BATCH_SIZE, per_process)))
+
+
 def get_exif_dates(files: list[Path]) -> dict[str, str | None]:
     """
     Get dates for all files via exiftool.
 
     Files are grouped by the -fast level their container allows (see
-    QUICKTIME_EXTENSIONS), then split into batches of EXIFTOOL_BATCH_SIZE
-    to bound the work of one exiftool process. Multiple batches run in
-    parallel (exiftool is single-threaded, so concurrent processes overlap
-    CPU and I/O).
+    QUICKTIME_EXTENSIONS), then each group is split into batches (see
+    _exiftool_batch_size) so that it is spread over up to
+    EXIFTOOL_MAX_PARALLEL exiftool processes. Exiftool is single-threaded
+    and CPU-bound, so even an ordinary folder of a few hundred files is
+    read in parallel; the QuickTime (CR3) batches, the slowest to parse,
+    are started first.
 
     Returns a dict with one entry per inspected file: filename -> formatted
     date string, or None if the file has no date tag. Files exiftool could
@@ -386,11 +464,20 @@ def get_exif_dates(files: list[Path]) -> dict[str, str | None]:
     for file in files:
         groups.setdefault(_exiftool_fast_flag(file), []).append(file)
 
-    batches = [
-        (group[i : i + EXIFTOOL_BATCH_SIZE], fast_flag)
-        for fast_flag, group in groups.items()
-        for i in range(0, len(group), EXIFTOOL_BATCH_SIZE)
-    ]
+    # "-fast" (QuickTime/CR3) first: those batches take longest, so starting
+    # them first keeps the pool from ending on one long straggler.
+    batches: list[tuple[list[Path], str]] = []
+    for fast_flag, group in sorted(groups.items(), key=lambda kv: kv[0] != "-fast"):
+        # Balanced split: 51 files -> 26 + 25, not 50 + 1 (a tiny tail batch
+        # costs a whole exiftool start-up for almost no work).
+        count = len(group)
+        n_batches = -(-count // _exiftool_batch_size(count))
+        base, extra = divmod(count, n_batches)
+        start = 0
+        for k in range(n_batches):
+            end = start + base + (1 if k < extra else 0)
+            batches.append((group[start:end], fast_flag))
+            start = end
 
     file_dates: dict[str, str | None] = {}
 
@@ -893,7 +980,7 @@ def process_files(
     if dry_run:
         log.warning("DRY RUN MODE — no changes will be made")
 
-    # Get all EXIF dates via exiftool (batched; parallel for large folders)
+    # Get all EXIF dates via exiftool (batched; split across parallel processes)
     log.info("Reading EXIF data...")
     try:
         file_dates = get_exif_dates(files)

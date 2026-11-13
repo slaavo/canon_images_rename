@@ -284,3 +284,95 @@ Użytkownik wybrał: poprawka i jeszcze jedna runda Codexa przed merge.
 
 Testy: ścieżka podstawowa nie woła `os.link`/`unlink` i zachowuje inode;
 źródło podmienione po `link` nie jest usuwane; fallback link działa normalnie.
+
+
+---
+
+## Runda 12 — równoległość exiftool dla zwykłych folderów (zamiast portu na Go)
+
+**Pytanie:** czy przepisać skrypt na Go dla wydajności? **Pomiar** na
+prawdziwym folderze (784 × CR3 + 784 × JPG, lokalny NVMe, 16 wątków CPU,
+Windows 11) pokazał, że Python to <1% czasu; ~99% to exiftool (Perl), który
+parsuje CR3 ~46 ms/plik — czysto CPU. Port na Go z tym samym exiftool dałby te
+same liczby, więc odrzucony.
+
+**Prawdziwy problem:** przy `EXIFTOOL_BATCH_SIZE = 5000` folder <5000 plików
+szedł jednym procesem — `EXIFTOOL_MAX_PARALLEL` nigdy się nie włączał.
+
+| exiftool na 784 × CR3 | czas |
+|---|---|
+| 1 proces (stan przed) | 36,2 s |
+| 4 procesy | 10,1 s |
+| 8 procesów | 6,3 s |
+| 12 procesów | 6,1 s |
+
+| Zmiana | Szczegóły |
+|--------|-----------|
+| `_exiftool_batch_size()` | Grupa dzielona na `EXIFTOOL_MAX_PARALLEL` procesów, celując w min `EXIFTOOL_MIN_BATCH_SIZE = 50` plików na proces (start exiftool ~0,5 s na Windows) i max `EXIFTOOL_BATCH_SIZE`; partie wyrównane co do jednego pliku. |
+| `EXIFTOOL_MAX_PARALLEL` | `min(8, os.cpu_count())` zamiast stałego 4. |
+| `EXIFTOOL_BATCH_SIZE` | 5000 → 2000: 5000 CR3 × 46 ms ≈ 230 s było blisko `EXIFTOOL_TIMEOUT = 300`; 2000 ≈ 90 s. |
+| Kolejność | Partie CR3 (`-fast`, najwolniejsze) startują pierwsze. |
+
+**Wynik end-to-end (`--dry-run`):** CR3 37–41 s → **7,4–8 s**, JPG 7 s → **2,2 s**;
+plan przeniesień identyczny ze starą wersją.
+
+Testy: podział zwykłego folderu na 8 procesów, brak podziału ≤ min, min i max
+rozmiar partii, każdy plik dokładnie raz, CR3 pierwsze, limit współbieżności,
+propagacja `ExifToolError` z równoległej partii.
+
+Uwaga: na Windows 7 testów pada niezależnie od tej zmiany (symlinki bez
+uprawnień, `\r\n` w stdin exiftool, nazwy nie-UTF-8) — tak samo przed nią.
+
+### Review wieloagentowe tej zmiany — 1 potwierdzona uwaga (średnia)
+
+**Regresja:** podział na sztywne kawałki dawał jednoplikowe ogony (51 → 50 + 1).
+Partia złożona wyłącznie z plików, których nie ma (np. zniknęły po
+skanie), kończy exiftool kodem 1 bez stdout → `ExifToolError`
+→ przerwanie **całego** przebiegu. Wcześniej taki plik dzielił partię z innymi i
+był tylko zgłaszany jako nieczytelny. Potwierdzone na prawdziwym exiftool 12.64.
+
+| Poprawka | Szczegóły |
+|----------|-----------|
+| Partie wyrównane | 51 → 26 + 25, 101 → 51 + 50; różnica rozmiarów ≤ 1 plik. |
+| `_all_open_errors()` | Kod 1 + puste stdout + stderr zawierające **wyłącznie** `Error: File not found` / `Error opening file` dla **dokładnie** plików partii → pusty wynik (pliki zgłoszone jako nieczytelne, bez mtime). Każda inna linia stderr, inny kod wyjścia, niepełna lista plików, timeout, sygnał → nadal `ExifToolError`. Na Windows exiftool odsyła ścieżki z `/` — porównanie normalizuje separator tylko tam (na POSIX `\` to zwykły znak nazwy). |
+
+Odrzucone przy weryfikacji: sformułowanie „never fewer than” w CLAUDE.md
+(poprawione mimo to) i nieaktualny komentarz „parallel for large folders”
+w `process_files()` (poprawiony).
+
+Weryfikacja z prawdziwym exiftool: partia samych brakujących plików → `{}`;
+25 dobrych + 26 brakujących (druga partia w całości brakująca) → 25 dat, bez
+przerwania. Plany przeniesień na folderze testowym nadal identyczne.
+
+### Review PR #9 (Codex + review ręczne)
+
+**P2 (Codex, potwierdzone niezależną reprodukcją):** `_record_batches()`
+zapisywał partie w kolejności *zakończenia* wątków, więc
+`test_batches_never_smaller_than_min_batch_size` czasem widział `[50, 49, 50]`.
+Helper sortuje teraz partie według pozycji pierwszego pliku na wejściu. Stres
+z `sys.setswitchinterval(1e-6)` znalazł drugi niestabilny test:
+`MagicMock.call_count` nie jest bezpieczny wątkowo (`+= 1`) — gubił wywołanie
+w `test_concurrency_capped_at_max_parallel` (3 zamiast 4). Licznik pod
+własnym lockiem, a w `test_mixed_cr3_and_jpeg_use_separate_invocations`
+`len(call_args_list)`. Po poprawce: 200/200 przebiegów pod stresem zielonych.
+
+**Obserwacja poza zakresem (istnieje też na `main`):** plik istniejący, ale
+bez prawa odczytu, **dostaje** od exiftool wiersz z pustymi datami (na Linux
+po `chmod 000`; na Windows potwierdzone `icacls /deny R`: wiersz
+`locked.jpg - - ` + tag `Error` = `Error opening file`, kod 1). Wynik `None` →
+fallback na mtime → zdjęcie trafia do złego folderu. Opis PR i komentarze w
+kodzie twierdziły, że brak uprawnień jest obsłużony — skorygowane (obsłużony
+jest tylko plik, którego nie ma).
+
+**Poprawka w tym samym PR (decyzja użytkownika):** exiftool dostaje `-Error`;
+wiersz z `Error` == `Error opening file` jest pomijany → plik nieobecny w
+wyniku → zgłoszony jako nieczytelny, zostaje na miejscu, bez mtime. Inne
+wartości `Error` (np. `File is empty`) zachowują dotychczasową ścieżkę
+`None` → mtime. Partia samych zablokowanych plików nie przerywa przebiegu
+(exiftool i tak drukuje wiersze).
+
+Weryfikacja na Windows z prawdziwym exiftool 12.64 (`icacls /deny R`, mtime
+ustawiony na 2025-01-01, `--dry-run`): przed poprawką `locked.jpg` →
+`2025_01_01/!orig/…` i 0 błędów; po poprawce błąd „could not be read”, plik
+na miejscu, `good.jpg` bez zmian. Folder testowy 784 CR3 + 784 JPG: czasy bez
+zmian (7,5 s / 2,2 s), plany identyczne z `main`.

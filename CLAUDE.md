@@ -45,22 +45,33 @@ function:
    (→ exit 1) if the folder cannot be read.
 2. `get_exif_dates()` — groups files by the exiftool `-fast` level their
    container allows (`-fast2` for JPEG/TIFF-based RAW, `-fast` for the
-   QuickTime-backed formats in `QUICKTIME_EXTENSIONS`, i.e. CR3), then runs one
-   exiftool call per batch of `EXIFTOOL_BATCH_SIZE` files. File lists go to
+   QuickTime-backed formats in `QUICKTIME_EXTENSIONS`, i.e. CR3), then splits
+   each group evenly over up to `EXIFTOOL_MAX_PARALLEL` processes
+   (`_exiftool_batch_size()` targets at least `EXIFTOOL_MIN_BATCH_SIZE` and at
+   most `EXIFTOOL_BATCH_SIZE` files per call; batches are balanced to within
+   one file, so no 1-file tail; CR3 batches start first).
+   Exiftool is single-threaded and CPU-bound (~46 ms per CR3), so this split
+   — not the language — is what sets the run time. File lists go to
    exiftool on stdin (`-@ -`) as filesystem bytes (`os.fsencode`; on Windows
    plus `-charset filename=utf8`), and the output is parsed as bytes with
    names decoded by `os.fsdecode`, so argv size is never an issue and
-   non-UTF-8 paths round-trip exactly; batching only bounds per-process work, and batches run in parallel capped at
-   `EXIFTOOL_MAX_PARALLEL`. `_run_exiftool_batch()` parses the tab-separated
+   non-UTF-8 paths round-trip exactly. `_run_exiftool_batch()` parses the tab-separated
    output and prefers DateTimeOriginal over CreateDate. A timeout, a
    signal-killed exiftool, or a non-zero exit with no output raises
-   `ExifToolError`; `process_files()` then aborts **before moving anything**
+   `ExifToolError` — unless exit is 1 and stderr holds nothing but
+   "File not found"/"Error opening file" for exactly the batch's files
+   (`_all_open_errors()`; exiftool echoes Windows paths with `/`), which is
+   the per-file unreadable case, not a failure; `process_files()` then aborts **before moving anything**
    (dates are unknown, not absent — no mtime fallback). Per file, the result
    dict carries a status: a file exiftool could open has an entry (its date,
    or `None` when it has no date tag → legitimate mtime fallback); a file
    exiftool could **not** open prints no output row and stays **absent** →
    `plan_moves()` reports it as unreadable (an error; the file is left in
-   place, never dated by mtime).
+   place, never dated by mtime). A missing file prints no row; a file that
+   exists but denies read access *does* print a row with empty dates, so the
+   `-Error` column is requested and a row whose Error is exactly
+   "Error opening file" is skipped (absent) — never treat it as `None`.
+   Other Error values (e.g. "File is empty") keep the `None` → mtime path.
 3. `get_mtime_dates()` — the only per-file `stat`, called by
    `process_files()` with exactly the files exiftool inspected and found no
    date for (an explicit `None` in `file_dates`); files with EXIF and
