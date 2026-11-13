@@ -288,9 +288,11 @@ def _run_exiftool_batch(batch: list[Path], fast_flag: str) -> dict[str, str | No
 
     Returns a dict with one entry per file exiftool could open: filename ->
     formatted date string, or None when the file has no date tag. Files
-    exiftool could not open at all (missing, permission denied) produce no
-    output row and are therefore absent — the caller must treat "absent" as
-    "not inspected", never as "no EXIF".
+    exiftool could not find (e.g. vanished after the scan) produce no output
+    row and are therefore absent — the caller must treat "absent" as
+    "not inspected", never as "no EXIF". (Known gap: a file that exists but
+    cannot be read — permission denied — still gets a row with empty dates
+    from exiftool, so it currently looks like "no date tag".)
 
     Raises ExifToolError if exiftool timed out, was killed by a signal, or
     exited non-zero without producing any output — except when its stderr
@@ -350,8 +352,8 @@ def _run_exiftool_batch(batch: list[Path], fast_flag: str) -> dict[str, str | No
 
     has_output = bool(result.stdout.strip())
 
-    # Every file in the batch failed to open (vanished, locked, no access):
-    # exiftool exits 1 with no output. That is the per-file "unreadable" case
+    # Every file in the batch is gone (e.g. vanished after the scan): exiftool
+    # exits 1 with no output. That is the per-file "unreadable" case
     # of a mixed batch, not an exiftool failure — return no entries so the
     # caller reports these files as unreadable. Anything less specific stays
     # fatal below.

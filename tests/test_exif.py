@@ -134,6 +134,10 @@ class TestGetExifDates:
             "rename_and_move_files._run_exiftool_batch", side_effect=fake_batch
         ):
             dates = get_exif_dates(files)
+        # Worker threads append in completion order, not submission order;
+        # put the batches back in input order so assertions are deterministic.
+        position = {f: i for i, f in enumerate(files)}
+        calls.sort(key=lambda c: position[c[0][0]])
         return calls, dates
 
     def test_ordinary_folder_is_split_across_processes(self):
@@ -229,10 +233,13 @@ class TestGetExifDates:
         lock = threading.Lock()
         running = 0
         peak = 0
+        calls = 0  # MagicMock.call_count is not thread-safe
 
         def fake_batch(batch, fast_flag):
             nonlocal running, peak
+            nonlocal calls
             with lock:
+                calls += 1
                 running += 1
                 peak = max(peak, running)
             time.sleep(0.02)
@@ -242,10 +249,10 @@ class TestGetExifDates:
 
         with patch("rename_and_move_files.EXIFTOOL_MAX_PARALLEL", 2), patch(
             "rename_and_move_files._run_exiftool_batch", side_effect=fake_batch
-        ) as mock_batch:
+        ):
             get_exif_dates(files)
 
-        assert mock_batch.call_count == 4
+        assert calls == 4
         assert peak == 2
 
     def test_max_parallel_bounded_by_cpu_count(self):
@@ -317,7 +324,8 @@ class TestGetExifDates:
         ) as mock_batch:
             dates = get_exif_dates([cr3, jpg])
 
-        assert mock_batch.call_count == 2
+        # call_args_list (one atomic append per call), not the racy call_count
+        assert len(mock_batch.call_args_list) == 2
         calls = {tuple(c.args[0]): c.args[1] for c in mock_batch.call_args_list}
         assert calls == {(cr3,): "-fast", (jpg,): "-fast2"}
         # Results from both invocations are merged

@@ -67,7 +67,10 @@ function:
    or `None` when it has no date tag → legitimate mtime fallback); a file
    exiftool could **not** open prints no output row and stays **absent** →
    `plan_moves()` reports it as unreadable (an error; the file is left in
-   place, never dated by mtime).
+   place, never dated by mtime). **Known gap:** that holds for a missing
+   file; one that exists but denies read access still gets a row with empty
+   dates (exiftool's `Error` tag says "Error opening file") and so currently
+   falls back to mtime — see REVIEW.md, PR #9.
 3. `get_mtime_dates()` — the only per-file `stat`, called by
    `process_files()` with exactly the files exiftool inspected and found no
    date for (an explicit `None` in `file_dates`); files with EXIF and

@@ -326,8 +326,8 @@ uprawnień, `\r\n` w stdin exiftool, nazwy nie-UTF-8) — tak samo przed nią.
 ### Review wieloagentowe tej zmiany — 1 potwierdzona uwaga (średnia)
 
 **Regresja:** podział na sztywne kawałki dawał jednoplikowe ogony (51 → 50 + 1).
-Partia złożona wyłącznie z plików nie do otwarcia (zniknął po skanie,
-zablokowany, brak uprawnień) kończy exiftool kodem 1 bez stdout → `ExifToolError`
+Partia złożona wyłącznie z plików, których nie ma (np. zniknęły po
+skanie), kończy exiftool kodem 1 bez stdout → `ExifToolError`
 → przerwanie **całego** przebiegu. Wcześniej taki plik dzielił partię z innymi i
 był tylko zgłaszany jako nieczytelny. Potwierdzone na prawdziwym exiftool 12.64.
 
@@ -343,3 +343,24 @@ w `process_files()` (poprawiony).
 Weryfikacja z prawdziwym exiftool: partia samych brakujących plików → `{}`;
 25 dobrych + 26 brakujących (druga partia w całości brakująca) → 25 dat, bez
 przerwania. Plany przeniesień na folderze testowym nadal identyczne.
+
+### Review PR #9 (Codex + review ręczne)
+
+**P2 (Codex, potwierdzone niezależną reprodukcją):** `_record_batches()`
+zapisywał partie w kolejności *zakończenia* wątków, więc
+`test_batches_never_smaller_than_min_batch_size` czasem widział `[50, 49, 50]`.
+Helper sortuje teraz partie według pozycji pierwszego pliku na wejściu. Stres
+z `sys.setswitchinterval(1e-6)` znalazł drugi niestabilny test:
+`MagicMock.call_count` nie jest bezpieczny wątkowo (`+= 1`) — gubił wywołanie
+w `test_concurrency_capped_at_max_parallel` (3 zamiast 4). Licznik pod
+własnym lockiem, a w `test_mixed_cr3_and_jpeg_use_separate_invocations`
+`len(call_args_list)`. Po poprawce: 200/200 przebiegów pod stresem zielonych.
+
+**Obserwacja poza zakresem (istnieje też na `main`):** plik istniejący, ale
+bez prawa odczytu, **dostaje** od exiftool wiersz z pustymi datami (na Linux
+po `chmod 000`; na Windows potwierdzone `icacls /deny R`: wiersz
+`locked.jpg - - ` + tag `Error` = `Error opening file`, kod 1). Wynik `None` →
+fallback na mtime → zdjęcie trafia do złego folderu. Opis PR i komentarze w
+kodzie twierdziły, że brak uprawnień jest obsłużony — skorygowane (obsłużony
+jest tylko plik, którego nie ma). Do osobnej poprawki: dodać kolumnę `-Error`
+i traktować `Error opening file` jako nieczytelny (brak wpisu, bez mtime).
