@@ -362,5 +362,17 @@ po `chmod 000`; na Windows potwierdzone `icacls /deny R`: wiersz
 `locked.jpg - - ` + tag `Error` = `Error opening file`, kod 1). Wynik `None` →
 fallback na mtime → zdjęcie trafia do złego folderu. Opis PR i komentarze w
 kodzie twierdziły, że brak uprawnień jest obsłużony — skorygowane (obsłużony
-jest tylko plik, którego nie ma). Do osobnej poprawki: dodać kolumnę `-Error`
-i traktować `Error opening file` jako nieczytelny (brak wpisu, bez mtime).
+jest tylko plik, którego nie ma).
+
+**Poprawka w tym samym PR (decyzja użytkownika):** exiftool dostaje `-Error`;
+wiersz z `Error` == `Error opening file` jest pomijany → plik nieobecny w
+wyniku → zgłoszony jako nieczytelny, zostaje na miejscu, bez mtime. Inne
+wartości `Error` (np. `File is empty`) zachowują dotychczasową ścieżkę
+`None` → mtime. Partia samych zablokowanych plików nie przerywa przebiegu
+(exiftool i tak drukuje wiersze).
+
+Weryfikacja na Windows z prawdziwym exiftool 12.64 (`icacls /deny R`, mtime
+ustawiony na 2025-01-01, `--dry-run`): przed poprawką `locked.jpg` →
+`2025_01_01/!orig/…` i 0 błędów; po poprawce błąd „could not be read”, plik
+na miejscu, `good.jpg` bez zmian. Folder testowy 784 CR3 + 784 JPG: czasy bez
+zmian (7,5 s / 2,2 s), plany identyczne z `main`.

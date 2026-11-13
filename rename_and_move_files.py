@@ -250,6 +250,9 @@ def validate_date(date_str: str | None) -> str | None:
     return date_str
 
 
+# exiftool's Error tag for a file that exists but could not be opened
+_EXIFTOOL_OPEN_ERROR_TAG = b"Error opening file"
+
 # exiftool's per-file messages for a file it could not open at all
 _EXIFTOOL_OPEN_ERROR = re.compile(rb"^Error: (?:File not found|Error opening file) - (.+)$")
 
@@ -289,10 +292,10 @@ def _run_exiftool_batch(batch: list[Path], fast_flag: str) -> dict[str, str | No
     Returns a dict with one entry per file exiftool could open: filename ->
     formatted date string, or None when the file has no date tag. Files
     exiftool could not find (e.g. vanished after the scan) produce no output
-    row and are therefore absent — the caller must treat "absent" as
-    "not inspected", never as "no EXIF". (Known gap: a file that exists but
-    cannot be read — permission denied — still gets a row with empty dates
-    from exiftool, so it currently looks like "no date tag".)
+    row; files it found but could not open (permission denied) produce a row
+    whose Error tag is "Error opening file", which is skipped. Both are
+    therefore absent — the caller must treat "absent" as "not inspected",
+    never as "no EXIF".
 
     Raises ExifToolError if exiftool timed out, was killed by a signal, or
     exited non-zero without producing any output — except when its stderr
@@ -331,7 +334,7 @@ def _run_exiftool_batch(batch: list[Path], fast_flag: str) -> dict[str, str | No
                 "exiftool", "-T", fast_flag,
                 "-d", "%Y_%m_%d_%H%M%S",
                 *charset_args,
-                "-filename", "-DateTimeOriginal", "-CreateDate",
+                "-filename", "-DateTimeOriginal", "-CreateDate", "-Error",
                 "-@", "-",
             ],
             input=b"\n".join(os.fsencode(p) for p in paths),
@@ -375,7 +378,8 @@ def _run_exiftool_batch(batch: list[Path], fast_flag: str) -> dict[str, str | No
             f"(batch of {len(paths)} files) — some files may be unreadable"
         )
 
-    # Parse tab-separated output: filename \t DateTimeOriginal \t CreateDate.
+    # Parse tab-separated output:
+    #   filename \t DateTimeOriginal \t CreateDate \t Error
     # Split on b"\n" and strip "\r" (Windows line ends); str.splitlines() would
     # also split names containing U+2028/U+0085. exiftool echoes file names as
     # raw bytes, and os.fsdecode() turns them into exactly the str that
@@ -398,6 +402,16 @@ def _run_exiftool_batch(batch: list[Path], fast_flag: str) -> dict[str, str | No
             validate_date(parts[2].decode("ascii", "replace").strip())
             if len(parts) >= 3 else None
         )
+
+        # A file that exists but cannot be opened (permission denied, locked)
+        # still gets a row, with empty dates and Error = "Error opening file".
+        # exiftool never inspected it, so it must stay absent (reported as
+        # unreadable), not become None (which would mean "no date tag" and
+        # file it by mtime).
+        error = parts[3].strip() if len(parts) >= 4 else b""
+        if error == _EXIFTOOL_OPEN_ERROR_TAG:
+            log.warning(f"exiftool could not open {filename!r} (no read access?)")
+            continue
 
         # Prefer DateTimeOriginal, fall back to CreateDate. A row with no
         # date still gets an entry (None): exiftool inspected the file.

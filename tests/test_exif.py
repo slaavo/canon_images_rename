@@ -537,6 +537,64 @@ class TestRunExiftoolBatch:
         assert gone.name not in dates  # reported as unreadable, not dated
         assert len(dates) == len(files) - 1
 
+    def test_requests_error_tag(self):
+        """The Error column is what tells "could not open" from "no date"."""
+        mock_result = MagicMock(returncode=0, stdout=b"", stderr=b"")
+
+        with patch("rename_and_move_files.subprocess.run", return_value=mock_result) as mock_run:
+            _run_exiftool_batch([Path("/fake/IMG.jpg")], "-fast2")
+
+        assert "-Error" in mock_run.call_args[0][0]
+
+    def test_read_denied_file_is_absent_not_none(self):
+        """Row with Error = "Error opening file" -> absent (unreadable), not None (mtime)."""
+        mock_result = MagicMock()
+        mock_result.returncode = 1
+        mock_result.stdout = (
+            b"locked.jpg\t-\t-\tError opening file\r\n"
+            b"IMG_02.jpg\t2022_07_18_135135\t2022_07_18_135135\t-\r\n"
+        )
+        mock_result.stderr = b""
+
+        with patch("rename_and_move_files.subprocess.run", return_value=mock_result):
+            results = _run_exiftool_batch(
+                [Path("/fake/locked.jpg"), Path("/fake/IMG_02.jpg")], "-fast2"
+            )
+
+        assert results == {"IMG_02.jpg": "2022_07_18_135135"}
+
+    def test_batch_of_only_read_denied_files_is_not_fatal(self):
+        """All files locked: exiftool still prints rows, so no abort; all absent."""
+        mock_result = MagicMock()
+        mock_result.returncode = 1
+        mock_result.stdout = b"a.jpg\t-\t-\tError opening file\nb.jpg\t-\t-\tError opening file\n"
+        mock_result.stderr = b""
+
+        with patch("rename_and_move_files.subprocess.run", return_value=mock_result):
+            assert _run_exiftool_batch([Path("/fake/a.jpg"), Path("/fake/b.jpg")], "-fast2") == {}
+
+    def test_other_error_tag_keeps_no_date_semantics(self):
+        """Only "Error opening file" means not inspected; e.g. an empty file stays None."""
+        mock_result = MagicMock()
+        mock_result.returncode = 1
+        mock_result.stdout = b"empty.jpg\t-\t-\tFile is empty\n"
+        mock_result.stderr = b""
+
+        with patch("rename_and_move_files.subprocess.run", return_value=mock_result):
+            assert _run_exiftool_batch([Path("/fake/empty.jpg")], "-fast2") == {"empty.jpg": None}
+
+    def test_date_row_with_error_column_parses(self):
+        """The extra column must not disturb date parsing."""
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = b"IMG.jpg\t-\t2024_01_15_143052\t-\n"
+        mock_result.stderr = b""
+
+        with patch("rename_and_move_files.subprocess.run", return_value=mock_result):
+            assert _run_exiftool_batch([Path("/fake/IMG.jpg")], "-fast2") == {
+                "IMG.jpg": "2024_01_15_143052"
+            }
+
     def test_nonzero_with_output_is_partial_success(self):
         """exiftool exits 1 when one file is unreadable but still prints the others."""
         mock_result = MagicMock()

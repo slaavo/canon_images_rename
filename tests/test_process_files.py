@@ -428,6 +428,38 @@ class TestUnreadableFile:
         assert (success, errors) == (1, 1)
         assert list(output_dir.iterdir()) == []
 
+    def _mock_exiftool_locked_bad(self):
+        # Real exiftool 12.64 output for a read-denied file (icacls /deny R):
+        # the file still gets a row, with no dates and Error = "Error opening file".
+        mock_result = MagicMock()
+        mock_result.returncode = 1
+        mock_result.stdout = (
+            b"good.jpg\t2024_01_15_143052\t2024_01_15_143052\t-\r\n"
+            b"bad.jpg\t-\t-\tError opening file\r\n"
+        )
+        mock_result.stderr = b""
+        return patch("rename_and_move_files.subprocess.run", return_value=mock_result)
+
+    def test_read_denied_file_is_error_not_filed_by_mtime(self, tmp_path: Path):
+        """A file exiftool found but could not open must not fall back to mtime."""
+        input_dir, output_dir = self._setup(tmp_path)
+
+        with self._mock_exiftool_locked_bad(), patch(
+            "rename_and_move_files.get_mtime_dates", return_value={}
+        ) as mock_mtime:
+            success, errors = process_files(
+                input_dir, output_dir,
+                move_raw_to_orig=False, dry_run=False,
+                interrupt_handler=InterruptHandler(), workers=1,
+            )
+
+        assert (success, errors) == (1, 1)
+        assert (input_dir / "bad.jpg").read_text() == "bad"
+        moved = sorted(p.name for p in output_dir.rglob("*.jpg"))
+        assert moved == ["2024_01_15_143052_good.jpg"]
+        # bad.jpg was never offered to the mtime fallback
+        assert all("bad.jpg" not in str(c) for c in mock_mtime.call_args_list)
+
 
 class TestLazyMtime:
     """mtime is fetched only for files exiftool inspected and found no date for."""
